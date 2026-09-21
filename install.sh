@@ -3,99 +3,172 @@
 set -Eeuo pipefail
 
 # =========================================================
-# Telegram Speedtest Bot - Recovery / Install Script
+# Telegram Speedtest Bot - ONE CLICK RECOVERY
+# GitHub:
+# https://github.com/zus599470/speedtest-bot
+#
+# Usage:
+# curl -fsSL https://raw.githubusercontent.com/zus599470/speedtest-bot/main/install.sh | bash
 # =========================================================
 
-APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="zus599470/speedtest-bot"
+BRANCH="main"
+
+APP_DIR="$HOME/speedtest-bot"
 SERVICE_NAME="speedtest-bot"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 
-if [[ "$EUID" -eq 0 ]]; then
-    SUDO=""
-    APP_USER="${SUDO_USER:-azam}"
-else
-    SUDO="sudo"
-    APP_USER="$USER"
-fi
+echo
+echo "=============================================="
+echo " Telegram Speedtest Bot - Recovery Installer"
+echo "=============================================="
+echo
+echo "User   : $USER"
+echo "Folder : $APP_DIR"
+echo
 
-if ! id "$APP_USER" >/dev/null 2>&1; then
-    echo "❌ User '$APP_USER' tidak dijumpai."
+# =========================================================
+# 1. Check sudo
+# =========================================================
+
+if ! command -v sudo >/dev/null 2>&1; then
+    echo "❌ sudo tidak dijumpai."
+    echo "Pasang sudo dahulu."
     exit 1
 fi
-
-echo
-echo "=============================================="
-echo "   Telegram Speedtest Bot - Auto Recovery"
-echo "=============================================="
-echo
-echo "📁 Folder : $APP_DIR"
-echo "👤 User   : $APP_USER"
-echo
-
-# =========================================================
-# 1. Update package list
-# =========================================================
-
-echo ">>> [1/9] Update Ubuntu..."
-
-$SUDO apt-get update
 
 # =========================================================
 # 2. Install system packages
 # =========================================================
 
-echo
-echo ">>> [2/9] Install keperluan sistem..."
+echo ">>> [1/8] Install system packages..."
 
-$SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+sudo apt-get update
+
+sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y \
     python3 \
     python3-full \
     python3-venv \
     python3-pip \
-    git \
     curl \
-    ca-certificates
+    ca-certificates \
+    git \
+    tar
+
+echo "✅ System packages siap."
 
 # =========================================================
-# 3. Install Ookla Speedtest
+# 3. Download repository from GitHub
 # =========================================================
 
 echo
-echo ">>> [3/9] Check Ookla Speedtest..."
+echo ">>> [2/8] Download project dari GitHub..."
+
+TMP_DIR="$(mktemp -d)"
+
+cleanup() {
+    rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT
+
+ARCHIVE_URL="https://github.com/${REPO}/archive/refs/heads/${BRANCH}.tar.gz"
+
+curl -fL "$ARCHIVE_URL" -o "$TMP_DIR/repo.tar.gz"
+
+tar -xzf "$TMP_DIR/repo.tar.gz" -C "$TMP_DIR"
+
+SRC_DIR="$TMP_DIR/${REPO##*/}-${BRANCH}"
+
+if [[ ! -d "$SRC_DIR" ]]; then
+    echo "❌ Folder repository tak dijumpai."
+    exit 1
+fi
+
+echo "✅ Repository berjaya dimuat turun."
+
+# =========================================================
+# 4. Create application folder
+# =========================================================
+
+echo
+echo ">>> [3/8] Setup folder bot..."
+
+mkdir -p "$APP_DIR"
+mkdir -p "$APP_DIR/server_selector"
+
+# Copy required files
+cp "$SRC_DIR/bot.py" "$APP_DIR/"
+cp "$SRC_DIR/bot_server.py" "$APP_DIR/"
+cp "$SRC_DIR/pihole_api.py" "$APP_DIR/"
+cp "$SRC_DIR/requirements.txt" "$APP_DIR/"
+
+cp "$SRC_DIR/server_selector/__init__.py" \
+   "$APP_DIR/server_selector/"
+
+cp "$SRC_DIR/server_selector/selector.py" \
+   "$APP_DIR/server_selector/"
+
+# Restore selected server file if it exists in repo
+if [[ -f "$SRC_DIR/server_selector/selected_server.json" ]]; then
+    cp "$SRC_DIR/server_selector/selected_server.json" \
+       "$APP_DIR/server_selector/"
+fi
+
+echo "✅ Fail bot dipulihkan."
+
+# =========================================================
+# 5. Create Python virtual environment
+# =========================================================
+
+echo
+echo ">>> [4/8] Setup Python virtual environment..."
+
+if [[ ! -x "$APP_DIR/venv/bin/python" ]]; then
+    python3 -m venv "$APP_DIR/venv"
+    echo "✅ venv baru dibuat."
+else
+    echo "✅ venv sedia ada digunakan."
+fi
+
+VENV_PYTHON="$APP_DIR/venv/bin/python"
+VENV_PIP="$APP_DIR/venv/bin/pip"
+
+# =========================================================
+# 6. Install Python packages
+# =========================================================
+
+echo
+echo ">>> [5/8] Install Python packages..."
+
+"$VENV_PIP" install --upgrade pip
+"$VENV_PIP" install -r "$APP_DIR/requirements.txt"
+
+echo "✅ Python packages siap."
+
+# =========================================================
+# 7. Install Ookla Speedtest
+# =========================================================
+
+echo
+echo ">>> [6/8] Check Ookla Speedtest..."
 
 if command -v speedtest >/dev/null 2>&1; then
+
     echo "✅ Speedtest sudah ada."
-    speedtest --version || true
+
 else
+
     echo "📥 Speedtest belum ada."
-    echo "Mencuba pasang repository rasmi Ookla..."
+    echo "Memasang repository Ookla..."
 
-    if curl -fsSL \
+    curl -fsSL \
         https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh \
-        | $SUDO bash; then
+        | sudo bash
 
-        if $SUDO apt-get install -y speedtest; then
-            echo "✅ Speedtest berjaya dipasang."
-        fi
-    fi
+    sudo apt-get update
 
-    # Fallback untuk ARM64 jika repository tidak menyediakan
-    # build yang sesuai dengan versi Ubuntu semasa.
-    if ! command -v speedtest >/dev/null 2>&1; then
-        echo "⚠️ Repository tidak berjaya memasang Speedtest."
-        echo "📥 Cuba pakej ARM64 Ookla 1.2.0.84..."
-
-        TMP_DEB="$(mktemp --suffix=.deb)"
-
-        curl -fL \
-            "https://packagecloud.io/ookla/speedtest-cli/packages/ubuntu/jammy/speedtest_1.2.0.84-1.ea6b6773cf_arm64.deb/download.deb?distro_version_id=237" \
-            -o "$TMP_DEB"
-
-        $SUDO dpkg -i "$TMP_DEB" || true
-        $SUDO apt-get install -f -y
-
-        rm -f "$TMP_DEB"
-    fi
+    sudo env DEBIAN_FRONTEND=noninteractive \
+        apt-get install -y speedtest
 
     if ! command -v speedtest >/dev/null 2>&1; then
         echo "❌ Speedtest gagal dipasang."
@@ -105,55 +178,26 @@ else
     echo "✅ Speedtest berjaya dipasang."
 fi
 
-# =========================================================
-# 4. Create Python virtual environment
-# =========================================================
-
-echo
-echo ">>> [4/9] Setup Python virtual environment..."
-
-if [[ ! -x "$APP_DIR/venv/bin/python" ]]; then
-    python3 -m venv "$APP_DIR/venv"
-    echo "✅ Virtual environment baru dibuat."
-else
-    echo "✅ Virtual environment sudah ada."
-fi
-
-VENV_PYTHON="$APP_DIR/venv/bin/python"
-VENV_PIP="$APP_DIR/venv/bin/pip"
+speedtest --version || true
 
 # =========================================================
-# 5. Install Python dependencies
+# 8. Create / preserve config.env
 # =========================================================
 
 echo
-echo ">>> [5/9] Install Python packages..."
-
-"$VENV_PIP" install --upgrade pip
-"$VENV_PIP" install -r "$APP_DIR/requirements.txt"
-
-echo "✅ Python packages siap."
-
-# =========================================================
-# 6. Create config.env
-# =========================================================
-
-echo
-echo ">>> [6/9] Setup config.env..."
-
-escape_env_value() {
-    local value="$1"
-    value="${value//\\/\\\\}"
-    value="${value//\"/\\\"}"
-    printf '"%s"' "$value"
-}
+echo ">>> [7/8] Setup config..."
 
 if [[ -f "$APP_DIR/config.env" ]]; then
-    echo "✅ config.env sudah ada. Tidak diubah."
+
+    echo "✅ config.env sudah ada."
+    echo "Tidak diubah."
+
 else
+
     echo
-    echo "Config belum ada."
-    echo "Script akan minta Telegram token dan Pi-hole password."
+    echo "=============================================="
+    echo " Config belum wujud"
+    echo "=============================================="
     echo
 
     read -r -s -p "Masukkan Telegram Bot Token: " BOT_TOKEN
@@ -165,7 +209,10 @@ else
     fi
 
     read -r -p "Pi-hole URL [http://192.168.0.12]: " PIHOLE_URL
-    PIHOLE_URL="${PIHOLE_URL:-http://192.168.0.12}"
+
+    if [[ -z "$PIHOLE_URL" ]]; then
+        PIHOLE_URL="http://192.168.0.12"
+    fi
 
     read -r -s -p "Masukkan Pi-hole Password: " PIHOLE_PASSWORD
     echo
@@ -175,14 +222,10 @@ else
         exit 1
     fi
 
-    BOT_TOKEN_ESC="$(escape_env_value "$BOT_TOKEN")"
-    PIHOLE_URL_ESC="$(escape_env_value "$PIHOLE_URL")"
-    PIHOLE_PASSWORD_ESC="$(escape_env_value "$PIHOLE_PASSWORD")"
-
     cat > "$APP_DIR/config.env" <<EOF
-BOT_TOKEN=$BOT_TOKEN_ESC
-PIHOLE_URL=$PIHOLE_URL_ESC
-PIHOLE_PASSWORD=$PIHOLE_PASSWORD_ESC
+BOT_TOKEN="$BOT_TOKEN"
+PIHOLE_URL="$PIHOLE_URL"
+PIHOLE_PASSWORD="$PIHOLE_PASSWORD"
 EOF
 
     chmod 600 "$APP_DIR/config.env"
@@ -193,26 +236,27 @@ fi
 chmod 600 "$APP_DIR/config.env"
 
 # =========================================================
-# 7. Check Python files
+# Python syntax check
 # =========================================================
 
 echo
-echo ">>> [7/9] Check Python code..."
+echo ">>> Python syntax check..."
 
-"$VENV_PYTHON" -m py_compile "$APP_DIR/bot.py"
-"$VENV_PYTHON" -m py_compile "$APP_DIR/bot_server.py"
-"$VENV_PYTHON" -m py_compile "$APP_DIR/pihole_api.py"
+"$VENV_PYTHON" -m py_compile \
+    "$APP_DIR/bot.py" \
+    "$APP_DIR/bot_server.py" \
+    "$APP_DIR/pihole_api.py"
 
-echo "✅ Semua Python file lulus syntax check."
+echo "✅ Python syntax OK."
 
 # =========================================================
-# 8. Create systemd service
+# Create systemd service
 # =========================================================
 
 echo
-echo ">>> [8/9] Setup systemd service..."
+echo ">>> [8/8] Setup systemd..."
 
-$SUDO tee "$SERVICE_FILE" > /dev/null <<EOF
+sudo tee "$SERVICE_FILE" > /dev/null <<EOF
 [Unit]
 Description=Telegram Speedtest Bot
 After=network-online.target
@@ -220,7 +264,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=$APP_USER
+User=$USER
 WorkingDirectory=$APP_DIR
 EnvironmentFile=$APP_DIR/config.env
 ExecStart=$APP_DIR/venv/bin/python $APP_DIR/bot_server.py
@@ -234,40 +278,52 @@ StandardError=journal
 WantedBy=multi-user.target
 EOF
 
-$SUDO systemctl daemon-reload
-$SUDO systemctl enable "$SERVICE_NAME"
+sudo systemctl daemon-reload
+sudo systemctl enable "$SERVICE_NAME"
 
-echo "✅ systemd siap."
+echo "✅ systemd configured."
 
 # =========================================================
-# 9. Start bot
+# Start bot
 # =========================================================
 
 echo
-echo ">>> [9/9] Start Telegram bot..."
+echo ">>> Starting Telegram bot..."
 
-$SUDO systemctl restart "$SERVICE_NAME"
+sudo systemctl restart "$SERVICE_NAME"
 
-sleep 3
+sleep 5
 
-if $SUDO systemctl is-active --quiet "$SERVICE_NAME"; then
+if sudo systemctl is-active --quiet "$SERVICE_NAME"; then
+
     echo
     echo "=============================================="
-    echo "✅ RECOVERY BERJAYA"
+    echo " ✅ RECOVERY BERJAYA"
     echo "=============================================="
     echo
     echo "Telegram Bot : RUNNING"
-    echo "Speedtest    : $(speedtest --version 2>/dev/null | head -n 1 || echo OK)"
-    echo "Service      : ENABLED"
+    echo "Speedtest    : INSTALLED"
+    echo "Pi-hole API  : CONFIGURED"
+    echo "systemd      : ENABLED"
+    echo
+    echo "Bot akan hidup semula selepas reboot."
     echo
     echo "Check status:"
     echo "sudo systemctl status speedtest-bot --no-pager"
     echo
+
 else
+
     echo
-    echo "❌ Bot gagal start."
+    echo "=============================================="
+    echo " ❌ BOT GAGAL START"
+    echo "=============================================="
     echo
-    echo "Semak log dengan:"
+    echo "Semak error:"
+    echo
     echo "sudo journalctl -u speedtest-bot -n 50 --no-pager"
+    echo
+
     exit 1
+
 fi
