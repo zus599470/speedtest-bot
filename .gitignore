@@ -1,0 +1,12 @@
+venv/
+__pycache__/
+*.pyc
+*.log
+*.backup.py
+bot_server.before-*.py
+config.env
+bot.py.before-github
+pihole_api.before-github
+*.backup*
+*.before-*
+*~
