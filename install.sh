@@ -47,7 +47,7 @@ $SUDO apt-get update
 echo
 echo ">>> [2/9] Install keperluan sistem..."
 
-$SUDO DEBIAN_FRONTEND=noninteractive apt-get install -y \
+$SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y \
     python3 \
     python3-full \
     python3-venv \
