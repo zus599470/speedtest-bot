@@ -16,18 +16,18 @@ echo "=============================================="
 echo " Raspberry Pi Speedtest Bot Restore Manager"
 echo "=============================================="
 echo
-echo "1.  ⚡ Telegram Speedtest Bot"
-echo "2.  🚀 Ookla Speedtest CLI"
-echo "3.  🛡️  Pi-hole"
-echo "4.  🌐 Server Selector"
-echo "5.  🕌 Waktu Solat JAKIM"
-echo "6.  🔔 Solat Reminder"
-echo "7.  👥 Approval / Manage Users"
-echo "8.  🖥️  Server Status"
-echo "9.  📱 APK Manager"
-echo "10. ⚙️  Systemd Bot Service"
-echo "11. 🚀 RESTORE SEMUA"
-echo "0.  ❌ Keluar"
+echo "1.  Telegram Speedtest Bot"
+echo "2.  Ookla Speedtest CLI"
+echo "3.  Pi-hole"
+echo "4.  Server Selector"
+echo "5.  Waktu Solat JAKIM"
+echo "6.  Solat Reminder"
+echo "7.  Approval / Manage Users"
+echo "8.  Server Status"
+echo "9.  APK Manager"
+echo "10. Systemd Bot Service"
+echo "11. RESTORE SEMUA"
+echo "0.  Keluar"
 echo
 read -rp "Pilih [0-11]: " CHOICE
 
@@ -234,7 +234,7 @@ restore_systemd() {
 restore_all() {
     echo
     echo "=============================================="
-    echo "11. 🚀 RESTORE SEMUA"
+    echo "11. RESTORE SEMUA"
     echo "=============================================="
 
     echo
