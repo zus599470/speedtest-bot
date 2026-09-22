@@ -1,7 +1,7 @@
 import json
 import os
-import re
 import subprocess
+import re
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(BASE_DIR, "selected_server.json")
@@ -17,7 +17,7 @@ def get_selected_server():
         with open(CONFIG_FILE, "r") as f:
             data = json.load(f)
 
-        if not data or "id" not in data:
+        if not data:
             return None
 
         return data
@@ -54,27 +54,20 @@ def get_servers():
         servers = []
 
         for line in result.stdout.splitlines():
+            line = line.strip()
 
-            line = line.rstrip()
-
-            # Skip header
-            if not line.strip():
+            if not line:
                 continue
 
-            if line.strip().startswith("ID "):
+            # Skip separator/header
+            if not re.match(r"^\d+", line):
                 continue
 
-            if line.strip().startswith("="):
-                continue
-
-            if line.strip().startswith("Closest servers"):
-                continue
-
-            # Expected:
-            # 57147  Uni5G  Cyberjaya  Malaysia
+            # Format Ookla:
+            # 57147  Uni5G                          Cyberjaya            Malaysia
 
             match = re.match(
-                r"^\s*(\d+)\s+(.+?)\s{2,}(.+?)\s{2,}(.+?)\s*$",
+                r"^(\d+)\s+(.+?)\s{2,}(.+?)\s{2,}(.+?)$",
                 line,
             )
 
@@ -99,3 +92,17 @@ def get_servers():
 
     except Exception:
         return []
+
+
+if __name__ == "__main__":
+    servers = get_servers()
+
+    print(f"Jumlah server: {len(servers)}")
+
+    for server in servers:
+        print(
+            f'{server["id"]} | '
+            f'{server["name"]} | '
+            f'{server["location"]} | '
+            f'{server["country"]}'
+        )

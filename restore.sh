@@ -26,10 +26,11 @@ echo "7.  👥 Approval / Manage Users"
 echo "8.  🖥️  Server Status"
 echo "9.  📱 APK Manager"
 echo "10. ⚙️  Systemd Bot Service"
-echo "11. 🚀 RESTORE SEMUA"
+echo "11. 📡 Local Telegram Bot API"
+echo "12. 🚀 RESTORE SEMUA"
 echo "0.  ❌ Keluar"
 echo
-read -rp "Pilih [0-11]: " CHOICE
+read -rp "Pilih [0-12]: " CHOICE
 
 run_script() {
     local SCRIPT="$1"
@@ -231,10 +232,107 @@ restore_systemd() {
     fi
 }
 
+
+restore_local_telegram_api() {
+    echo
+    echo "=============================================="
+    echo " 📡 Local Telegram Bot API"
+    echo "=============================================="
+
+    API_DIR="$HOME/telegram-bot-api"
+    ENV_FILE="$HOME/telegram_api.env"
+    LAUNCHER="/usr/local/bin/start-telegram-bot-api.sh"
+    SERVICE="/etc/systemd/system/telegram-bot-api.service"
+
+    if [ ! -d "$API_DIR" ]; then
+        echo "📥 Clone Telegram Bot API..."
+        git clone --recursive https://github.com/tdlib/telegram-bot-api.git "$API_DIR" || {
+            echo "❌ Gagal clone Telegram Bot API."
+            return 1
+        }
+    else
+        echo "✅ telegram-bot-api source sudah ada."
+    fi
+
+    if ! command -v /usr/local/bin/telegram-bot-api >/dev/null 2>&1; then
+        echo "🔨 Build Telegram Bot API..."
+
+        cd "$API_DIR" || return 1
+        mkdir -p build
+        cd build || return 1
+
+        cmake -DCMAKE_BUILD_TYPE=Release .. || return 1
+        cmake --build . --target telegram-bot-api -j1 || return 1
+        sudo cmake --install . || return 1
+    else
+        echo "✅ Telegram Bot API binary sudah ada."
+    fi
+
+    if [ ! -f "$ENV_FILE" ]; then
+        echo
+        echo "⚠️ $ENV_FILE belum ada."
+        echo "Sila buat fail tersebut dengan:"
+        echo
+        echo "TELEGRAM_API_ID=YOUR_API_ID"
+        echo "TELEGRAM_API_HASH=YOUR_API_HASH"
+        echo
+        echo "❌ Restore Local Telegram Bot API dihentikan."
+        return 1
+    fi
+
+    sudo tee "$LAUNCHER" >/dev/null <<'EOF'
+#!/bin/bash
+set -a
+source /home/azam/telegram_api.env
+set +a
+
+exec /usr/local/bin/telegram-bot-api \
+  --api-id="${TELEGRAM_API_ID}" \
+  --api-hash="${TELEGRAM_API_HASH}" \
+  --local \
+  --http-port=8081
+EOF
+
+    sudo chmod 755 "$LAUNCHER"
+    sudo sed -i 's/\r$//' "$LAUNCHER"
+
+    sudo tee "$SERVICE" >/dev/null <<'EOF'
+[Unit]
+Description=Telegram Local Bot API Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=azam
+WorkingDirectory=/home/azam/telegram-bot-api
+ExecStart=/usr/local/bin/start-telegram-bot-api.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    sudo systemctl daemon-reload
+    sudo systemctl enable telegram-bot-api
+    sudo systemctl restart telegram-bot-api
+
+    sleep 3
+
+    if systemctl is-active --quiet telegram-bot-api; then
+        echo "✅ Local Telegram Bot API RUNNING."
+    else
+        echo "❌ Local Telegram Bot API gagal berjalan."
+        sudo systemctl status telegram-bot-api --no-pager
+        return 1
+    fi
+}
+
 restore_all() {
     echo
     echo "=============================================="
-    echo "11. 🚀 RESTORE SEMUA"
+    echo "12. 🚀 RESTORE SEMUA"
     echo "=============================================="
 
     echo
@@ -256,6 +354,7 @@ restore_all() {
     restore_server_status
     restore_apk
     restore_systemd
+    restore_local_telegram_api
 
     echo
     echo "=============================================="

@@ -18,6 +18,19 @@ from telegram.ext import (
     ContextTypes,
 )
 
+import os
+from pathlib import Path
+
+# Load BOT_TOKEN from config.env
+config_file = Path("/home/azam/speedtest-bot/config.env")
+if config_file.exists():
+    for line in config_file.read_text().splitlines():
+        line = line.strip()
+        if line.startswith("BOT_TOKEN="):
+            value = line.split("=", 1)[1].strip().strip('"').strip("'")
+            os.environ["BOT_TOKEN"] = value
+            break
+
 from bot import BOT_TOKEN
 
 from server_selector.selector import (
@@ -85,7 +98,8 @@ def is_admin(user_id):
 
 
 def is_approved(user_id):
-    return is_admin(user_id) or get_user_status(user_id) == "approved"
+    status = get_user_status(user_id)
+    return is_admin(user_id) or status == "approved"
 
 
 def register_user(user):
@@ -172,6 +186,10 @@ async def send_access_request(update, context):
             "🚫 <b>ACCESS DITOLAK</b>\n\n"
             "Permintaan akses anda telah ditolak oleh admin.",
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
         )
         return False
 
@@ -183,6 +201,10 @@ async def send_access_request(update, context):
             "Tekan butang di bawah untuk menghantar "
             "permintaan akses.",
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
             reply_markup=approval_request_keyboard(),
         )
 
@@ -232,6 +254,10 @@ async def handle_access_request(query, context):
         chat_id=next(iter(ADMIN_IDS)),
         text=message,
         parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
         reply_markup=admin_request_keyboard(user.id),
     )
 
@@ -240,10 +266,104 @@ async def handle_access_request(query, context):
         "Permintaan akses anda telah dihantar kepada admin.\n"
         "Sila tunggu kelulusan.",
         parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
     )
 
 
 async def show_admin_users(query):
+    if not is_admin(query.from_user.id):
+        await query.answer(
+            "🚫 Admin sahaja.",
+            show_alert=True,
+        )
+        return
+
+    users = load_users()
+
+    counts = {
+        "approved": 0,
+        "pending": 0,
+        "rejected": 0,
+        "revoked": 0,
+        "blocked": 0,
+    }
+
+    for info in users.values():
+        status = info.get("status", "pending")
+
+        if status in counts:
+            counts[status] += 1
+        else:
+            counts["pending"] += 1
+
+    lines = [
+        "👥 <b>USER MANAGEMENT</b>",
+        "",
+        f"🟢 Active: <b>{counts['approved']}</b>",
+        f"🟡 Pending: <b>{counts['pending']}</b>",
+        f"🚫 Revoked: <b>{counts['revoked']}</b>",
+        f"🔴 Blocked: <b>{counts['blocked']}</b>",
+        f"⚪ Rejected: <b>{counts['rejected']}</b>",
+        "",
+        "👇 <b>Pilih kategori user:</b>",
+    ]
+
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "🟢 Active Users",
+                    callback_data="admin_approved",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🟡 Pending Users",
+                    callback_data="admin_pending",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🚫 Revoked Users",
+                    callback_data="admin_revoked",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🔴 Blocked Users",
+                    callback_data="admin_blocked",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "⚪ Rejected Users",
+                    callback_data="admin_rejected_list",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🔄 Refresh",
+                    callback_data="admin_users",
+                ),
+                InlineKeyboardButton(
+                    "🏠 Home",
+                    callback_data="home",
+                ),
+            ],
+        ]
+    )
+
+    await query.edit_message_text(
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=keyboard,
+    )
+
+
+async def show_rejected_users(query):
     user_id = query.from_user.id
 
     if not is_admin(user_id):
@@ -254,72 +374,105 @@ async def show_admin_users(query):
         return
 
     users = load_users()
-
-    approved = []
-    pending = []
     rejected = []
 
     for uid, info in users.items():
-        status = info.get("status", "pending")
-        name = info.get("name", "")
+        if info.get("status") != "rejected":
+            continue
+
+        name = info.get("name", "Unknown")
         username = info.get("username", "")
 
-        display = (
-            f"• {name}"
-            f" {'@' + username if username else ''}"
-            f" — <code>{uid}</code>"
+        rejected.append(
+            (
+                str(uid),
+                name,
+                username,
+            )
         )
 
-        if status == "approved":
-            approved.append(display)
-        elif status == "rejected":
-            rejected.append(display)
-        else:
-            pending.append(display)
-
     lines = [
-        "👥 <b>USER MANAGEMENT</b>",
-        "",
-        f"⏳ Pending: <b>{len(pending)}</b>",
-        f"✅ Approved: <b>{len(approved)}</b>",
-        f"❌ Rejected: <b>{len(rejected)}</b>",
+        "🚫 <b>REJECTED USERS</b>",
         "",
     ]
 
-    if pending:
-        lines.append("<b>⏳ PENDING</b>")
-        lines.extend(pending)
+    if not rejected:
+        lines.append(
+            "Tiada user yang ditolak."
+        )
 
-    if approved:
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Back",
+                        callback_data="admin_users",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "🏠 Home",
+                        callback_data="home",
+                    )
+                ],
+            ]
+        )
+
+    else:
+        lines.append(
+            f"❌ Jumlah: <b>{len(rejected)}</b>"
+        )
         lines.append("")
-        lines.append("<b>✅ APPROVED</b>")
-        lines.extend(approved)
 
-    if rejected:
-        lines.append("")
-        lines.append("<b>❌ REJECTED</b>")
-        lines.extend(rejected)
+        buttons = []
 
-    keyboard = InlineKeyboardMarkup(
-        [
+        for uid, name, username in rejected:
+            display_name = name or "Unknown"
+
+            if username:
+                display_name += f" @{username}"
+
+            lines.append(
+                f"👤 {display_name}\n"
+                f"🆔 <code>{uid}</code>"
+            )
+
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        f"♻️ Approve {display_name[:25]}",
+                        callback_data=f"reapprove_user_{uid}",
+                    )
+                ]
+            )
+
+        buttons.append(
             [
                 InlineKeyboardButton(
-                    "🔄 Refresh",
+                    "⬅️ Back",
                     callback_data="admin_users",
                 )
-            ],
+            ]
+        )
+
+        buttons.append(
             [
                 InlineKeyboardButton(
                     "🏠 Home",
                     callback_data="home",
                 )
-            ],
-        ]
-    )
+            ]
+        )
+
+        keyboard = InlineKeyboardMarkup(buttons)
 
     await query.edit_message_text(
         "\n".join(lines),
         parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
         reply_markup=keyboard,
     )
 
@@ -352,6 +505,10 @@ async def approve_user(query, context, target_id):
         f"👤 {info.get('name', '')}\n"
         f"🆔 <code>{target_id}</code>",
         parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
     )
 
     try:
@@ -363,10 +520,76 @@ async def approve_user(query, context, target_id):
                 "Tekan /start untuk membuka menu utama."
             ),
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
         )
     except Exception as error:
         logger.warning(
             "Tidak dapat hantar approval notification: %s",
+            error,
+        )
+
+
+async def reapprove_user(query, context, target_id):
+    if not is_admin(query.from_user.id):
+        await query.answer(
+            "🚫 Admin sahaja.",
+            show_alert=True,
+        )
+        return
+
+    users = load_users()
+    target_id = str(target_id)
+
+    if target_id not in users:
+        await query.answer(
+            "User tidak dijumpai.",
+            show_alert=True,
+        )
+        return
+
+    if users[target_id].get("status") != "rejected":
+        await query.answer(
+            "User ini bukan dalam senarai rejected.",
+            show_alert=True,
+        )
+        return
+
+    users[target_id]["status"] = "approved"
+    save_users(users)
+
+    info = users[target_id]
+
+    await query.edit_message_text(
+        "♻️ <b>ACCESS APPROVED SEMULA</b>\n\n"
+        f"👤 {info.get('name', '')}\n"
+        f"🆔 <code>{target_id}</code>",
+        parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
+    )
+
+    try:
+        await context.bot.send_message(
+            chat_id=int(target_id),
+            text=(
+                "♻️ <b>AKSES DILULUSKAN SEMULA</b>\n\n"
+                "Admin telah meluluskan semula akses anda.\n\n"
+                "Tekan /start untuk membuka menu utama."
+            ),
+            parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
+        )
+    except Exception as error:
+        logger.warning(
+            "Tidak dapat hantar reapproval notification: %s",
             error,
         )
 
@@ -399,6 +622,10 @@ async def reject_user(query, context, target_id):
         f"👤 {info.get('name', '')}\n"
         f"🆔 <code>{target_id}</code>",
         parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
     )
 
     try:
@@ -409,6 +636,10 @@ async def reject_user(query, context, target_id):
                 "Permintaan akses anda telah ditolak oleh admin."
             ),
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
         )
     except Exception as error:
         logger.warning(
@@ -417,12 +648,462 @@ async def reject_user(query, context, target_id):
         )
 
 
+
+async def show_user_list(query, status_filter):
+    """Paparkan senarai user yang boleh dipilih oleh admin."""
+
+    if not is_admin(query.from_user.id):
+        await query.answer("🚫 Admin sahaja.", show_alert=True)
+        return
+
+    users = load_users()
+
+    selected = []
+    for uid, info in users.items():
+        status = info.get("status", "pending")
+
+        if status != status_filter:
+            continue
+
+        selected.append(
+            (
+                str(uid),
+                info.get("name", "Unknown"),
+                info.get("username", ""),
+            )
+        )
+
+    titles = {
+        "approved": "🟢 APPROVED USERS",
+        "pending": "🟡 PENDING USERS",
+        "rejected": "⚪ REJECTED USERS",
+        "revoked": "🚫 REVOKED USERS",
+        "blocked": "🔴 BLOCKED USERS",
+    }
+
+    lines = [
+        f"<b>{titles.get(status_filter, '👥 USERS')}</b>",
+        "",
+        f"Jumlah: <b>{len(selected)}</b>",
+        "",
+    ]
+
+    buttons = []
+
+    if not selected:
+        lines.append("Tiada user dalam kategori ini.")
+    else:
+        for uid, name, username in selected:
+            display = name or "Unknown"
+
+            if username:
+                display += f" @{username}"
+
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        f"👤 {display[:30]}",
+                        callback_data=f"user_manage_{uid}",
+                    )
+                ]
+            )
+
+    buttons.append(
+        [
+            InlineKeyboardButton(
+                "⬅️ Manage Users",
+                callback_data="admin_users",
+            )
+        ]
+    )
+
+    buttons.append(
+        [
+            InlineKeyboardButton(
+                "🏠 Home",
+                callback_data="home",
+            )
+        ]
+    )
+
+    await query.edit_message_text(
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+async def show_user_manage(query, target_id):
+    """Paparkan tindakan untuk user yang dipilih."""
+
+    if not is_admin(query.from_user.id):
+        await query.answer("🚫 Admin sahaja.", show_alert=True)
+        return
+
+    users = load_users()
+    target_id = str(target_id)
+
+    if target_id not in users:
+        await query.answer(
+            "❌ User tidak dijumpai.",
+            show_alert=True,
+        )
+        return
+
+    info = users[target_id]
+
+    name = info.get("name", "Unknown")
+    username = info.get("username", "")
+    status = info.get("status", "pending")
+
+    status_text = {
+        "approved": "🟢 ACTIVE",
+        "pending": "🟡 PENDING",
+        "rejected": "⚪ REJECTED",
+        "revoked": "🚫 REVOKED",
+        "blocked": "🔴 BLOCKED",
+    }.get(status, status)
+
+    lines = [
+        "👤 <b>USER MANAGEMENT</b>",
+        "",
+        f"👤 Nama: <b>{name}</b>",
+        f"🆔 ID: <code>{target_id}</code>",
+    ]
+
+    if username:
+        lines.append(f"📱 Username: @{username}")
+
+    lines.extend(
+        [
+            f"📌 Status: <b>{status_text}</b>",
+            "",
+        ]
+    )
+
+    buttons = []
+
+    # Jangan benarkan admin mengubah dirinya sendiri.
+    if int(target_id) != query.from_user.id:
+
+        if status == "approved":
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        "🚫 Revoke Access",
+                        callback_data=f"revoke_user_{target_id}",
+                    ),
+                    InlineKeyboardButton(
+                        "🔴 Block User",
+                        callback_data=f"block_user_{target_id}",
+                    ),
+                ]
+            )
+
+        elif status in ("pending", "rejected", "revoked"):
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        "✅ Approve Access",
+                        callback_data=f"approve_user_{target_id}",
+                    )
+                ]
+            )
+
+        if status == "blocked":
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        "🟢 Unblock User",
+                        callback_data=f"unblock_user_{target_id}",
+                    )
+                ]
+            )
+
+        if status != "blocked":
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        "🔴 Block User",
+                        callback_data=f"block_user_{target_id}",
+                    )
+                ]
+            )
+
+    else:
+        lines.append("🛡️ Ini ialah akaun admin anda.")
+        lines.append("Akaun admin tidak boleh diubah.")
+
+    buttons.append(
+        [
+            InlineKeyboardButton(
+                "⬅️ Manage Users",
+                callback_data="admin_users",
+            )
+        ]
+    )
+
+    buttons.append(
+        [
+            InlineKeyboardButton(
+                "🏠 Home",
+                callback_data="home",
+            )
+        ]
+    )
+
+    await query.edit_message_text(
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+
+async def confirm_revoke_user(query, target_id):
+    if not is_admin(query.from_user.id):
+        await query.answer("🚫 Admin sahaja.", show_alert=True)
+        return
+
+    users = load_users()
+    target_id = str(target_id)
+
+    if target_id not in users:
+        await query.answer("❌ User tidak dijumpai.", show_alert=True)
+        return
+
+    if int(target_id) == query.from_user.id:
+        await query.answer(
+            "❌ Admin tidak boleh revoke diri sendiri.",
+            show_alert=True,
+        )
+        return
+
+    info = users[target_id]
+    name = info.get("name", "Unknown")
+
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "✅ Ya, Revoke",
+                    callback_data=f"confirm_revoke_{target_id}",
+                ),
+                InlineKeyboardButton(
+                    "❌ Batal",
+                    callback_data=f"user_manage_{target_id}",
+                ),
+            ]
+        ]
+    )
+
+    await query.edit_message_text(
+        "⚠️ <b>CONFIRM REVOKE</b>\n\n"
+        f"👤 User: <b>{name}</b>\n"
+        f"🆔 ID: <code>{target_id}</code>\n\n"
+        "User akan kehilangan akses bot.\n"
+        "User masih boleh request access semula.\n\n"
+        "Teruskan?",
+        parse_mode="HTML",
+        reply_markup=keyboard,
+    )
+
+
+async def confirm_block_user(query, target_id):
+    if not is_admin(query.from_user.id):
+        await query.answer("🚫 Admin sahaja.", show_alert=True)
+        return
+
+    users = load_users()
+    target_id = str(target_id)
+
+    if target_id not in users:
+        await query.answer("❌ User tidak dijumpai.", show_alert=True)
+        return
+
+    if int(target_id) == query.from_user.id:
+        await query.answer(
+            "❌ Admin tidak boleh block diri sendiri.",
+            show_alert=True,
+        )
+        return
+
+    info = users[target_id]
+    name = info.get("name", "Unknown")
+
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "🔴 Ya, Block",
+                    callback_data=f"confirm_block_{target_id}",
+                ),
+                InlineKeyboardButton(
+                    "❌ Batal",
+                    callback_data=f"user_manage_{target_id}",
+                ),
+            ]
+        ]
+    )
+
+    await query.edit_message_text(
+        "⚠️ <b>CONFIRM BLOCK</b>\n\n"
+        f"👤 User: <b>{name}</b>\n"
+        f"🆔 ID: <code>{target_id}</code>\n\n"
+        "User akan disekat daripada menggunakan bot.\n"
+        "Request access juga akan ditolak.\n\n"
+        "Teruskan?",
+        parse_mode="HTML",
+        reply_markup=keyboard,
+    )
+
+
+async def revoke_user(query, target_id):
+    if not is_admin(query.from_user.id):
+        await query.answer("🚫 Admin sahaja.", show_alert=True)
+        return
+
+    users = load_users()
+    target_id = str(target_id)
+
+    if target_id not in users:
+        await query.answer("❌ User tidak dijumpai.", show_alert=True)
+        return
+
+    if int(target_id) == query.from_user.id:
+        await query.answer(
+            "❌ Admin tidak boleh revoke diri sendiri.",
+            show_alert=True,
+        )
+        return
+
+    users[target_id]["status"] = "revoked"
+    save_users(users)
+
+    await query.edit_message_text(
+        "🚫 <b>ACCESS REVOKED</b>\n\n"
+        f"👤 {users[target_id].get('name', 'Unknown')}\n"
+        f"🆔 <code>{target_id}</code>\n\n"
+        "User ini tidak lagi mempunyai akses bot.\n"
+        "User masih boleh membuat permintaan akses semula.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Manage Users",
+                        callback_data="admin_users",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "🏠 Home",
+                        callback_data="home",
+                    )
+                ],
+            ]
+        ),
+    )
+
+
+async def block_user(query, target_id):
+    if not is_admin(query.from_user.id):
+        await query.answer("🚫 Admin sahaja.", show_alert=True)
+        return
+
+    users = load_users()
+    target_id = str(target_id)
+
+    if target_id not in users:
+        await query.answer("❌ User tidak dijumpai.", show_alert=True)
+        return
+
+    if int(target_id) == query.from_user.id:
+        await query.answer(
+            "❌ Admin tidak boleh block diri sendiri.",
+            show_alert=True,
+        )
+        return
+
+    users[target_id]["status"] = "blocked"
+    save_users(users)
+
+    await query.edit_message_text(
+        "🔴 <b>USER BLOCKED</b>\n\n"
+        f"👤 {users[target_id].get('name', 'Unknown')}\n"
+        f"🆔 <code>{target_id}</code>\n\n"
+        "User ini telah disekat daripada menggunakan bot.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Manage Users",
+                        callback_data="admin_users",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "🏠 Home",
+                        callback_data="home",
+                    )
+                ],
+            ]
+        ),
+    )
+
+
+async def unblock_user(query, target_id):
+    if not is_admin(query.from_user.id):
+        await query.answer("🚫 Admin sahaja.", show_alert=True)
+        return
+
+    users = load_users()
+    target_id = str(target_id)
+
+    if target_id not in users:
+        await query.answer("❌ User tidak dijumpai.", show_alert=True)
+        return
+
+    users[target_id]["status"] = "revoked"
+    save_users(users)
+
+    await query.edit_message_text(
+        "🟢 <b>USER UNBLOCKED</b>\n\n"
+        f"👤 {users[target_id].get('name', 'Unknown')}\n"
+        f"🆔 <code>{target_id}</code>\n\n"
+        "User telah dibuka sekatannya.\n"
+        "Status ditetapkan kepada REVOKED dan perlu approve semula.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Manage Users",
+                        callback_data="admin_users",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "🏠 Home",
+                        callback_data="home",
+                    )
+                ],
+            ]
+        ),
+    )
+
+
 async def show_access_denied(query):
     await query.edit_message_text(
         "🔐 <b>ACCESS DIPERLUKAN</b>\n\n"
         "Akaun anda belum diluluskan.\n\n"
         "Tekan butang di bawah untuk meminta akses.",
         parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
         reply_markup=approval_request_keyboard(),
     )
 
@@ -476,6 +1157,10 @@ async def animate_message(
             await query.edit_message_text(
                 f"{title}\n\n{message}",
                 parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
             )
             await asyncio.sleep(delay)
 
@@ -1104,7 +1789,7 @@ def solat_zone_keyboard(state):
     return InlineKeyboardMarkup(rows)
 
 
-async def show_solat_menu(query):
+async def show_solat_menu(query, context=None):
     user_id = query.from_user.id
     zone = get_user_solat_zone(user_id)
 
@@ -1114,6 +1799,10 @@ async def show_solat_menu(query):
             "📍 Lokasi belum ditetapkan.\n\n"
             "Sila pilih lokasi anda terlebih dahulu.",
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
             reply_markup=InlineKeyboardMarkup(
                 [
                     [
@@ -1151,6 +1840,10 @@ async def show_solat_menu(query):
             "🕌 <b>WAKTU SOLAT</b>\n\n"
             "❌ Gagal mendapatkan waktu solat.",
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
             reply_markup=InlineKeyboardMarkup(
                 [
                     [
@@ -1301,6 +1994,10 @@ async def show_solat_menu(query):
     await query.edit_message_text(
         message,
         parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
@@ -1310,6 +2007,10 @@ async def show_solat_states(query):
         "📍 <b>PILIH NEGERI</b>\n\n"
         "Pilih negeri untuk melihat zon waktu solat:",
         parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
         reply_markup=solat_state_keyboard(),
     )
 
@@ -1326,6 +2027,10 @@ async def show_solat_zones(query, state):
         f"📍 <b>{state}</b>\n\n"
         "Pilih zon kawasan anda:",
         parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
         reply_markup=solat_zone_keyboard(state),
     )
 
@@ -1353,7 +2058,7 @@ async def select_solat_zone(query, zone):
         show_alert=False,
     )
 
-    await show_solat_menu(query)
+    await show_solat_menu(query, context)
 
 
 def main_keyboard():
@@ -1566,6 +2271,10 @@ async def show_server_menu(query):
         "🌐 <b>PILIH SERVER</b>\n\n"
         "⏳ <i>Loading server...</i>",
         parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
     )
 
     await asyncio.sleep(0.5)
@@ -1579,6 +2288,10 @@ async def show_server_menu(query):
             "❌ <b>Server tidak dijumpai.</b>\n\n"
             "Ookla tidak dapat memberikan senarai server.",
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
             reply_markup=InlineKeyboardMarkup(
                 [
                     [
@@ -1616,6 +2329,10 @@ async def show_server_menu(query):
     await query.edit_message_text(
         text,
         parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
         reply_markup=server_keyboard(),
     )
 
@@ -1629,6 +2346,10 @@ async def show_status(query):
         "📊 <b>STATUS BOT</b>\n\n"
         "⏳ <i>Checking status...</i>",
         parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
     )
 
     await asyncio.sleep(0.5)
@@ -1684,6 +2405,10 @@ async def show_status(query):
     await query.edit_message_text(
         text,
         parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
         reply_markup=keyboard,
     )
 
@@ -1747,6 +2472,10 @@ async def show_pihole_menu(query):
         "🛡️ <b>PI-HOLE</b>\n\n"
         "⏳ <i>Checking Pi-hole status...</i>",
         parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
     )
 
     await asyncio.sleep(0.5)
@@ -1761,6 +2490,10 @@ async def show_pihole_menu(query):
             "❌ <b>PI-HOLE</b>\n\n"
             "Tidak dapat berhubung dengan Pi-hole.",
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
             reply_markup=InlineKeyboardMarkup(
                 [
                     [
@@ -1805,6 +2538,10 @@ async def show_pihole_menu(query):
     await query.edit_message_text(
         text,
         parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
         reply_markup=pihole_menu_keyboard(),
     )
 
@@ -1814,6 +2551,10 @@ async def show_pihole_status(query):
         "🛡️ <b>PI-HOLE STATUS</b>\n\n"
         "⏳ <i>Checking Pi-hole status...</i>",
         parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
     )
 
     await asyncio.sleep(0.5)
@@ -1827,6 +2568,10 @@ async def show_pihole_status(query):
         await query.edit_message_text(
             "❌ <b>Pi-hole tidak dapat dicapai.</b>",
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
             reply_markup=pihole_menu_keyboard(),
         )
         return
@@ -1857,6 +2602,10 @@ async def show_pihole_status(query):
     await query.edit_message_text(
         text,
         parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
         reply_markup=InlineKeyboardMarkup(
             [
                 [
@@ -1885,6 +2634,10 @@ async def show_pihole_stats(query):
         "📈 <b>PI-HOLE STATISTICS</b>\n\n"
         "⏳ <i>Loading statistics...</i>",
         parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
     )
 
     await asyncio.sleep(0.5)
@@ -1898,6 +2651,10 @@ async def show_pihole_stats(query):
         await query.edit_message_text(
             "❌ <b>Gagal mendapatkan statistics Pi-hole.</b>",
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
             reply_markup=pihole_menu_keyboard(),
         )
         return
@@ -1933,6 +2690,10 @@ async def show_pihole_stats(query):
     await query.edit_message_text(
         text,
         parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
         reply_markup=InlineKeyboardMarkup(
             [
                 [
@@ -1973,6 +2734,10 @@ async def show_pihole_queries(query, blocked_only=False):
         f"{title}\n\n"
         f"⏳ <i>{loading}</i>",
         parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
     )
 
     await asyncio.sleep(0.5)
@@ -1986,6 +2751,10 @@ async def show_pihole_queries(query, blocked_only=False):
         await query.edit_message_text(
             "❌ <b>Gagal mendapatkan Query Log.</b>",
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
             reply_markup=pihole_menu_keyboard(),
         )
         return
@@ -2058,6 +2827,10 @@ async def show_pihole_queries(query, blocked_only=False):
     await query.edit_message_text(
         text,
         parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
         reply_markup=InlineKeyboardMarkup(
             [
                 [
@@ -2087,6 +2860,10 @@ async def show_pihole_protection(query):
         "🛡️ <b>PI-HOLE PROTECTION</b>\n\n"
         "⏳ <i>Checking protection...</i>",
         parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
     )
 
     await asyncio.sleep(0.5)
@@ -2100,6 +2877,10 @@ async def show_pihole_protection(query):
         await query.edit_message_text(
             "❌ <b>Gagal mendapatkan status protection.</b>",
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
             reply_markup=pihole_menu_keyboard(),
         )
         return
@@ -2131,6 +2912,10 @@ async def show_pihole_protection(query):
         "🛡️ <b>PI-HOLE PROTECTION</b>\n\n"
         f"{protection_text}",
         parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
         reply_markup=InlineKeyboardMarkup(
             [
                 [
@@ -2167,6 +2952,10 @@ async def set_pihole_protection(query, enabled):
         "🛡️ <b>PI-HOLE PROTECTION</b>\n\n"
         f"⏳ <i>Turning protection {state}...</i>",
         parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
     )
 
     result = await asyncio.to_thread(
@@ -2178,6 +2967,10 @@ async def set_pihole_protection(query, enabled):
         await query.edit_message_text(
             "❌ <b>Gagal menukar protection Pi-hole.</b>",
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
             reply_markup=pihole_menu_keyboard(),
         )
         return
@@ -2190,6 +2983,10 @@ async def set_pihole_protection(query, enabled):
         "🛡️ <b>PI-HOLE PROTECTION</b>\n\n"
         f"✅ Protection sekarang: <b>{status_text}</b>",
         parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
         reply_markup=InlineKeyboardMarkup(
             [
                 [
@@ -2282,6 +3079,10 @@ async def show_apk_menu(query):
             "❌ Tiada APK dalam library.\n\n"
             f"📂 Folder:\n<code>{APK_DIR}</code>",
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
             reply_markup=InlineKeyboardMarkup(
                 [
                     [
@@ -2306,6 +3107,10 @@ async def show_apk_menu(query):
         f"📦 Jumlah APK: <b>{len(apk_files)}</b>\n\n"
         "Pilih aplikasi:",
         parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
         reply_markup=apk_menu_keyboard(),
     )
 
@@ -2320,6 +3125,10 @@ async def show_apk_file(query, index):
         await query.edit_message_text(
             "❌ APK tidak dijumpai.",
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
             reply_markup=InlineKeyboardMarkup(
                 [
                     [
@@ -2342,6 +3151,10 @@ async def show_apk_file(query, index):
         f"💾 Saiz: <b>{size_mb:.1f} MB</b>\n\n"
         "Pilih tindakan:",
         parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
         reply_markup=InlineKeyboardMarkup(
             [
                 [
@@ -2388,9 +3201,11 @@ async def send_apk(query, context, index):
         )
         return
 
+    file_size = apk.stat().st_size
     await query.edit_message_text(
         "📦 <b>APK MANAGER</b>\n\n"
         f"📱 <b>{apk.stem}</b>\n"
+        f"📦 Saiz: <b>{file_size / 1024 / 1024:.2f} MB</b>\n"
         "⏳ <i>Sedang hantar APK...</i>",
         parse_mode="HTML",
     )
@@ -2403,6 +3218,10 @@ async def send_apk(query, context, index):
                 filename=apk.name,
                 caption=f"📱 <b>{apk.stem}</b>",
                 parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
             )
 
         await query.edit_message_text(
@@ -2434,13 +3253,17 @@ async def send_apk(query, context, index):
             "❌ <b>Gagal menghantar APK.</b>\n\n"
             f"<code>{error}</code>",
             parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ APK Manager",
+                            callback_data="apk_menu",
+                        )
+                    ]
+                ]
+            ),
         )
-
-
-# =========================================================
-# CALLBACK HANDLER
-# =========================================================
-
 
 async def show_solat_date_menu(query):
     selected_date = get_user_solat_date(
@@ -2492,6 +3315,10 @@ async def show_solat_date_menu(query):
     await query.edit_message_text(
         text,
         parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
@@ -2513,7 +3340,7 @@ async def change_solat_date(query, days):
         new_date,
     )
 
-    await show_solat_menu(query)
+    await show_solat_menu(query, context)
 
 
 
@@ -2553,7 +3380,7 @@ async def button_handler(
             show_alert=True,
         )
 
-        await show_solat_menu(query)
+        await show_solat_menu(query, context)
         return
 
     if callback == "solat_reminder_off":
@@ -2574,16 +3401,46 @@ async def button_handler(
             show_alert=True,
         )
 
-        await show_solat_menu(query)
+        await show_solat_menu(query, context)
         return
 
 
     if callback == "solat_menu":
-        await show_solat_menu(query)
+        try:
+            with open(
+                "/home/azam/speedtest-bot/assets/masjid.gif",
+                "rb",
+            ) as gif_file:
+                gif_message = await query.message.reply_animation(
+                    animation=gif_file,
+                    caption=(
+                        "🕌 <b>WAKTU SOLAT</b>\n\n"
+                        "⏳ Sedang mendapatkan waktu solat..."
+                    ),
+                    parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
+                )
+
+            await asyncio.sleep(1)
+
+            try:
+                await gif_message.delete()
+            except Exception:
+                pass
+        except Exception as error:
+            logger.exception(
+                "GIF masjid gagal dihantar: %s",
+                error,
+            )
+
+        await show_solat_menu(query, context)
         return
 
     if callback == "solat_refresh":
-        await show_solat_menu(query)
+        await show_solat_menu(query, context)
         return
 
     if callback == "solat_date":
@@ -2633,6 +3490,10 @@ async def button_handler(
         await query.edit_message_text(
             home_text(),
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
             reply_markup=main_keyboard(query.from_user.id),
         )
         return
@@ -2658,6 +3519,60 @@ async def button_handler(
         await show_admin_users(query)
         return
 
+    if callback == "admin_approved":
+        await show_user_list(query, "approved")
+        return
+
+    if callback == "admin_pending":
+        await show_user_list(query, "pending")
+        return
+
+    if callback == "admin_rejected_list":
+        await show_user_list(query, "rejected")
+        return
+
+    if callback == "admin_revoked":
+        await show_user_list(query, "revoked")
+        return
+
+    if callback == "admin_blocked":
+        await show_user_list(query, "blocked")
+        return
+
+    if callback.startswith("user_manage_"):
+        target_id = callback.replace("user_manage_", "", 1)
+        await show_user_manage(query, target_id)
+        return
+
+    if callback.startswith("revoke_user_"):
+        target_id = callback.replace("revoke_user_", "", 1)
+        await confirm_revoke_user(query, target_id)
+        return
+
+    if callback.startswith("confirm_revoke_"):
+        target_id = callback.replace("confirm_revoke_", "", 1)
+        await revoke_user(query, target_id)
+        return
+
+    if callback.startswith("block_user_"):
+        target_id = callback.replace("block_user_", "", 1)
+        await confirm_block_user(query, target_id)
+        return
+
+    if callback.startswith("confirm_block_"):
+        target_id = callback.replace("confirm_block_", "", 1)
+        await block_user(query, target_id)
+        return
+
+    if callback.startswith("unblock_user_"):
+        target_id = callback.replace("unblock_user_", "", 1)
+        await unblock_user(query, target_id)
+        return
+
+    if callback == "admin_rejected":
+        await show_rejected_users(query)
+        return
+
     if callback.startswith("approve_user_"):
         target_id = callback.replace(
             "approve_user_", "", 1
@@ -2680,6 +3595,17 @@ async def button_handler(
         )
         return
 
+    if callback.startswith("reapprove_user_"):
+        target_id = callback.replace(
+            "reapprove_user_", "", 1
+        )
+        await reapprove_user(
+            query,
+            context,
+            target_id,
+        )
+        return
+
     # Semua fungsi bot selepas ini hanya untuk
     # approved users atau admin.
     if not is_approved(query.from_user.id):
@@ -2692,6 +3618,26 @@ async def button_handler(
 
     if callback == "apk_download_nuvio":
         await send_nuvio(query, context)
+        return
+
+    if callback.startswith("apk_file_"):
+        index = callback.replace("apk_file_", "", 1)
+        await show_apk_file(query, index)
+        return
+
+    if callback.startswith("apk_download_"):
+        index = callback.replace("apk_download_", "", 1)
+        await send_apk(query, context, index)
+        return
+
+    if callback.startswith("apk_file_"):
+        index = callback.replace("apk_file_", "", 1)
+        await show_apk_file(query, index)
+        return
+
+    if callback.startswith("apk_download_"):
+        index = callback.replace("apk_download_", "", 1)
+        await send_apk(query, context, index)
         return
 
     # =====================================================
@@ -2721,6 +3667,10 @@ async def button_handler(
             "🏠 <b>HOME</b>\n\n"
             "⏳ <i>Loading...</i>",
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
         )
 
         await asyncio.sleep(0.35)
@@ -2728,6 +3678,10 @@ async def button_handler(
         await query.edit_message_text(
             home_text(),
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
             reply_markup=main_keyboard(query.from_user.id),
         )
         return
@@ -2741,6 +3695,10 @@ async def button_handler(
             "⬅️ <b>BACK</b>\n\n"
             "⏳ <i>Loading Home...</i>",
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
         )
 
         await asyncio.sleep(0.35)
@@ -2748,6 +3706,10 @@ async def button_handler(
         await query.edit_message_text(
             home_text(),
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
             reply_markup=main_keyboard(query.from_user.id),
         )
         return
@@ -2761,6 +3723,10 @@ async def button_handler(
             "⬅️ <b>BACK</b>\n\n"
             "⏳ <i>Loading Home...</i>",
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
         )
 
         await asyncio.sleep(0.35)
@@ -2768,6 +3734,10 @@ async def button_handler(
         await query.edit_message_text(
             home_text(),
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
             reply_markup=main_keyboard(query.from_user.id),
         )
         return
@@ -2801,6 +3771,10 @@ async def button_handler(
             "🌐 <b>SERVER</b>\n\n"
             "⏳ <i>Menukar server...</i>",
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
         )
 
         servers = await asyncio.to_thread(
@@ -2818,6 +3792,10 @@ async def button_handler(
             await query.edit_message_text(
                 "❌ <b>Server tidak dijumpai.</b>",
                 parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
                 reply_markup=InlineKeyboardMarkup(
                     [
                         [
@@ -2876,6 +3854,10 @@ async def button_handler(
         await query.edit_message_text(
             text,
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
             reply_markup=keyboard,
         )
 
@@ -2890,6 +3872,10 @@ async def button_handler(
             "🤖 <b>AUTO SERVER</b>\n\n"
             "⏳ <i>Setting Auto Server...</i>",
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
         )
 
         await asyncio.sleep(0.5)
@@ -2903,6 +3889,10 @@ async def button_handler(
             "Ookla Speedtest akan memilih "
             "server secara automatik.",
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
             reply_markup=InlineKeyboardMarkup(
                 [
                     [
@@ -2939,6 +3929,10 @@ async def button_handler(
                 "⚡ <b>SPEEDTEST</b>\n\n"
                 "⏳ Testing.",
                 parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
             )
 
             await asyncio.sleep(0.45)
@@ -2947,6 +3941,10 @@ async def button_handler(
                 "⚡ <b>SPEEDTEST</b>\n\n"
                 "⏳ Testing..",
                 parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
             )
 
             await asyncio.sleep(0.45)
@@ -2955,6 +3953,10 @@ async def button_handler(
                 "⚡ <b>SPEEDTEST</b>\n\n"
                 "⏳ Testing...",
                 parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
             )
 
             await asyncio.sleep(0.45)
@@ -2963,6 +3965,10 @@ async def button_handler(
                 "⚡ <b>SPEEDTEST</b>\n\n"
                 "🔄 Connecting to Ookla...",
                 parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
             )
 
             data = await asyncio.to_thread(
@@ -2999,6 +4005,10 @@ async def button_handler(
         await query.edit_message_text(
             format_result(data),
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
             disable_web_page_preview=True,
             reply_markup=keyboard,
         )
@@ -3020,6 +4030,10 @@ async def button_handler(
             "▶️ <b>START AUTO</b>\n\n"
             "⏳ <i>Starting Auto Speedtest...</i>",
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
         )
 
         await asyncio.sleep(0.6)
@@ -3040,6 +4054,10 @@ async def button_handler(
             "Bot akan menjalankan Speedtest "
             "secara automatik.",
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
             reply_markup=InlineKeyboardMarkup(
                 [
                     [
@@ -3069,6 +4087,10 @@ async def button_handler(
             "⏹️ <b>STOP AUTO</b>\n\n"
             "⏳ <i>Stopping Auto Speedtest...</i>",
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
         )
 
         await asyncio.sleep(0.5)
@@ -3082,6 +4104,10 @@ async def button_handler(
             "\n"
             "Auto Speedtest tidak lagi berjalan.",
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
             reply_markup=main_keyboard(query.from_user.id),
         )
 
@@ -3199,6 +4225,10 @@ async def auto_speedtest_job(
                     chat_id=chat_id,
                     text=text,
                     parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
                     disable_web_page_preview=True,
                 )
 
@@ -3352,6 +4382,10 @@ async def send_solat_reminder(
             chat_id=int(user_id),
             text=message,
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
         )
 
         logger.info(
@@ -3924,6 +4958,10 @@ async def show_server_status(query):
         await query.edit_message_text(
             status_text,
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
             reply_markup=server_status_keyboard(),
         )
 
@@ -3938,6 +4976,10 @@ async def show_server_status(query):
             "🍓 <b>STATUS SERVER</b>\n\n"
             "❌ Gagal mendapatkan status server.",
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
             reply_markup=server_status_keyboard(),
         )
 
@@ -3975,6 +5017,10 @@ async def start_command(
     await update.message.reply_text(
         home_text(),
         parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
         reply_markup=keyboard,
     )
 
@@ -3996,6 +5042,10 @@ async def solat_command(update, context):
             "Sila buka menu <b>🕌 Waktu Solat</b> untuk pilih lokasi "
             "anda terlebih dahulu.",
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
         )
         return
 
@@ -4018,6 +5068,10 @@ async def solat_command(update, context):
             "❌ Gagal mendapatkan waktu solat.\n"
             "🔄 Sila cuba lagi sebentar lagi.",
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
         )
         return
 
@@ -4064,6 +5118,10 @@ async def solat_command(update, context):
     await update.message.reply_text(
         message,
         parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
         reply_markup=InlineKeyboardMarkup(
             [
                 [
@@ -4101,11 +5159,18 @@ async def speedtest_command(
     user_id = update.effective_user.id
 
     try:
-        await update.message.reply_text(
-            "⚡ <b>SPEEDTEST</b>\n\n"
-            "⏳ Sedang menjalankan Speedtest...\n"
-            "🌐 Sila tunggu sebentar.",
+        await update.message.reply_animation(
+            animation="https://media.giphy.com/media/JIX9t2j0ZTN9S/giphy.gif",
+            caption=(
+                "🐱 <b>KUCING TENGAH TEST INTERNET...</b>\n\n"
+                "⚡ Speedtest sedang dijalankan...\n"
+                "🌐 Sila tunggu sebentar."
+            ),
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
         )
 
         result = await asyncio.to_thread(
@@ -4122,6 +5187,10 @@ async def speedtest_command(
         await update.message.reply_text(
             message,
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
             disable_web_page_preview=True,
         )
 
@@ -4140,6 +5209,10 @@ async def speedtest_command(
             "❌ <b>SPEEDTEST GAGAL</b>\n\n"
             "Sila cuba lagi sebentar lagi.",
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
         )
 
 
@@ -4169,6 +5242,10 @@ async def status_command(
             "🖥️ Server Status: <b>READY</b>\n\n"
             "📡 Telegram connection aktif.",
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
         )
 
     except Exception as error:
@@ -4181,6 +5258,10 @@ async def status_command(
             "🤖 <b>STATUS BOT</b>\n\n"
             "❌ Gagal mendapatkan status.",
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
         )
 
 
@@ -4197,6 +5278,10 @@ async def server_command(
         await update.message.reply_text(
             text,
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
             reply_markup=server_status_keyboard(),
         )
 
@@ -4210,6 +5295,10 @@ async def server_command(
             "🖥️ <b>STATUS SERVER</b>\n\n"
             "❌ Gagal mendapatkan status server.",
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
         )
 
 
@@ -4232,6 +5321,10 @@ async def help_command(
         "Buka menu utama bot.\n\n"
         "❓ Jika command tidak berfungsi, cuba /start terlebih dahulu.",
         parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
     )
 
 
@@ -4253,9 +5346,12 @@ def main():
     application = (
         Application.builder()
         .token(BOT_TOKEN)
+        .base_url("http://127.0.0.1:8081/bot")
+        .base_file_url("http://127.0.0.1:8081/file/bot")
+        .local_mode(True)
         .connect_timeout(30)
-        .read_timeout(30)
-        .write_timeout(30)
+        .read_timeout(120)
+        .write_timeout(600)
         .pool_timeout(30)
         .post_init(post_init)
         .post_shutdown(post_shutdown)
