@@ -1,0 +1,18 @@
+{
+  "202940674": {
+    "name": "Azam",
+    "username": "AD0315",
+    "status": "approved",
+    "solat_zone": "NGS02",
+    "solat_date": "2026-09-22",
+    "solat_reminder_log": [
+      "2026-09-22|NGS02|fajr|5",
+      "2026-09-22|NGS02|fajr|0"
+    ]
+  },
+  "8882460739": {
+    "name": "Ad",
+    "username": "",
+    "status": "rejected"
+  }
+}

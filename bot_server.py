@@ -1,9 +1,14 @@
+import os
+from pathlib import Path
 import asyncio
 import json
 import logging
 import socket
 import subprocess
-from datetime import datetime
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -35,6 +40,391 @@ from pihole_api import (
 
 SPEEDTEST_PATH = "/usr/bin/speedtest"
 INTERVAL_MINUTES = 10
+
+# =========================================================
+# USER APPROVAL SYSTEM
+# =========================================================
+
+ADMIN_IDS = {202940674}
+
+APPROVAL_FILE = Path(__file__).resolve().parent / "users.json"
+
+
+def load_users():
+    if not APPROVAL_FILE.exists():
+        return {}
+
+    try:
+        with open(APPROVAL_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        return data if isinstance(data, dict) else {}
+
+    except Exception:
+        return {}
+
+
+def save_users(users):
+    temp_file = APPROVAL_FILE.with_suffix(".tmp")
+
+    with open(temp_file, "w", encoding="utf-8") as f:
+        json.dump(users, f, indent=2, ensure_ascii=False)
+
+    temp_file.replace(APPROVAL_FILE)
+
+
+def get_user_status(user_id):
+    user_id = str(user_id)
+    users = load_users()
+
+    return users.get(user_id, {}).get("status", "pending")
+
+
+def is_admin(user_id):
+    return user_id in ADMIN_IDS
+
+
+def is_approved(user_id):
+    return is_admin(user_id) or get_user_status(user_id) == "approved"
+
+
+def register_user(user):
+    users = load_users()
+    user_id = str(user.id)
+
+    existing = users.get(user_id)
+
+    if existing:
+        existing["name"] = user.full_name or ""
+        existing["username"] = user.username or ""
+        users[user_id] = existing
+    else:
+        users[user_id] = {
+            "name": user.full_name or "",
+            "username": user.username or "",
+            "status": "pending",
+        }
+
+    save_users(users)
+
+
+def approval_request_keyboard():
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "🔐 Request Access",
+                    callback_data="request_access",
+                )
+            ]
+        ]
+    )
+
+
+def admin_keyboard():
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "👥 Manage Users",
+                    callback_data="admin_users",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🏠 Home",
+                    callback_data="home",
+                )
+            ],
+        ]
+    )
+
+
+def admin_request_keyboard(user_id):
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "✅ Approve",
+                    callback_data=f"approve_user_{user_id}",
+                ),
+                InlineKeyboardButton(
+                    "❌ Reject",
+                    callback_data=f"reject_user_{user_id}",
+                ),
+            ]
+        ]
+    )
+
+
+async def send_access_request(update, context):
+    user = update.effective_user
+
+    register_user(user)
+
+    status = get_user_status(user.id)
+
+    if status == "approved":
+        return True
+
+    if status == "rejected":
+        await update.message.reply_text(
+            "🚫 <b>ACCESS DITOLAK</b>\n\n"
+            "Permintaan akses anda telah ditolak oleh admin.",
+            parse_mode="HTML",
+        )
+        return False
+
+    if status == "pending":
+        await update.message.reply_text(
+            "🔐 <b>ACCESS DIPERLUKAN</b>\n\n"
+            "Anda perlu mendapatkan kelulusan admin "
+            "sebelum boleh menggunakan bot ini.\n\n"
+            "Tekan butang di bawah untuk menghantar "
+            "permintaan akses.",
+            parse_mode="HTML",
+            reply_markup=approval_request_keyboard(),
+        )
+
+    return False
+
+
+async def handle_access_request(query, context):
+    user = query.from_user
+
+    register_user(user)
+
+    status = get_user_status(user.id)
+
+    if status == "approved":
+        await query.answer(
+            "✅ Anda sudah diluluskan.",
+            show_alert=True,
+        )
+        return
+
+    if status == "rejected":
+        await query.answer(
+            "🚫 Akses anda telah ditolak.",
+            show_alert=True,
+        )
+        return
+
+    users = load_users()
+    users[str(user.id)]["status"] = "pending"
+    save_users(users)
+
+    username = (
+        f"@{user.username}"
+        if user.username
+        else "(tiada username)"
+    )
+
+    message = (
+        "🔔 <b>ACCESS REQUEST BARU</b>\n\n"
+        f"👤 Nama: {user.full_name}\n"
+        f"🔗 Username: {username}\n"
+        f"🆔 ID: <code>{user.id}</code>\n\n"
+        "Sila pilih tindakan:"
+    )
+
+    await context.bot.send_message(
+        chat_id=next(iter(ADMIN_IDS)),
+        text=message,
+        parse_mode="HTML",
+        reply_markup=admin_request_keyboard(user.id),
+    )
+
+    await query.edit_message_text(
+        "⏳ <b>PERMINTAAN DIHANTAR</b>\n\n"
+        "Permintaan akses anda telah dihantar kepada admin.\n"
+        "Sila tunggu kelulusan.",
+        parse_mode="HTML",
+    )
+
+
+async def show_admin_users(query):
+    user_id = query.from_user.id
+
+    if not is_admin(user_id):
+        await query.answer(
+            "🚫 Admin sahaja.",
+            show_alert=True,
+        )
+        return
+
+    users = load_users()
+
+    approved = []
+    pending = []
+    rejected = []
+
+    for uid, info in users.items():
+        status = info.get("status", "pending")
+        name = info.get("name", "")
+        username = info.get("username", "")
+
+        display = (
+            f"• {name}"
+            f" {'@' + username if username else ''}"
+            f" — <code>{uid}</code>"
+        )
+
+        if status == "approved":
+            approved.append(display)
+        elif status == "rejected":
+            rejected.append(display)
+        else:
+            pending.append(display)
+
+    lines = [
+        "👥 <b>USER MANAGEMENT</b>",
+        "",
+        f"⏳ Pending: <b>{len(pending)}</b>",
+        f"✅ Approved: <b>{len(approved)}</b>",
+        f"❌ Rejected: <b>{len(rejected)}</b>",
+        "",
+    ]
+
+    if pending:
+        lines.append("<b>⏳ PENDING</b>")
+        lines.extend(pending)
+
+    if approved:
+        lines.append("")
+        lines.append("<b>✅ APPROVED</b>")
+        lines.extend(approved)
+
+    if rejected:
+        lines.append("")
+        lines.append("<b>❌ REJECTED</b>")
+        lines.extend(rejected)
+
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "🔄 Refresh",
+                    callback_data="admin_users",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🏠 Home",
+                    callback_data="home",
+                )
+            ],
+        ]
+    )
+
+    await query.edit_message_text(
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=keyboard,
+    )
+
+
+async def approve_user(query, context, target_id):
+    if not is_admin(query.from_user.id):
+        await query.answer(
+            "🚫 Admin sahaja.",
+            show_alert=True,
+        )
+        return
+
+    users = load_users()
+    target_id = str(target_id)
+
+    if target_id not in users:
+        await query.answer(
+            "User tidak dijumpai.",
+            show_alert=True,
+        )
+        return
+
+    users[target_id]["status"] = "approved"
+    save_users(users)
+
+    info = users[target_id]
+
+    await query.edit_message_text(
+        "✅ <b>ACCESS APPROVED</b>\n\n"
+        f"👤 {info.get('name', '')}\n"
+        f"🆔 <code>{target_id}</code>",
+        parse_mode="HTML",
+    )
+
+    try:
+        await context.bot.send_message(
+            chat_id=int(target_id),
+            text=(
+                "✅ <b>ACCESS DILULUSKAN</b>\n\n"
+                "Permintaan akses anda telah diluluskan.\n"
+                "Tekan /start untuk membuka menu utama."
+            ),
+            parse_mode="HTML",
+        )
+    except Exception as error:
+        logger.warning(
+            "Tidak dapat hantar approval notification: %s",
+            error,
+        )
+
+
+async def reject_user(query, context, target_id):
+    if not is_admin(query.from_user.id):
+        await query.answer(
+            "🚫 Admin sahaja.",
+            show_alert=True,
+        )
+        return
+
+    users = load_users()
+    target_id = str(target_id)
+
+    if target_id not in users:
+        await query.answer(
+            "User tidak dijumpai.",
+            show_alert=True,
+        )
+        return
+
+    users[target_id]["status"] = "rejected"
+    save_users(users)
+
+    info = users[target_id]
+
+    await query.edit_message_text(
+        "❌ <b>ACCESS REJECTED</b>\n\n"
+        f"👤 {info.get('name', '')}\n"
+        f"🆔 <code>{target_id}</code>",
+        parse_mode="HTML",
+    )
+
+    try:
+        await context.bot.send_message(
+            chat_id=int(target_id),
+            text=(
+                "❌ <b>ACCESS DITOLAK</b>\n\n"
+                "Permintaan akses anda telah ditolak oleh admin."
+            ),
+            parse_mode="HTML",
+        )
+    except Exception as error:
+        logger.warning(
+            "Tidak dapat hantar rejection notification: %s",
+            error,
+        )
+
+
+async def show_access_denied(query):
+    await query.edit_message_text(
+        "🔐 <b>ACCESS DIPERLUKAN</b>\n\n"
+        "Akaun anda belum diluluskan.\n\n"
+        "Tekan butang di bawah untuk meminta akses.",
+        parse_mode="HTML",
+        reply_markup=approval_request_keyboard(),
+    )
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -334,6 +724,638 @@ def format_result(data):
 # HOME KEYBOARD
 # =========================================================
 
+
+# =========================================================
+# WAKTU SOLAT JAKIM
+# =========================================================
+
+JAKIM_SOLAT_API = (
+    "https://www.e-solat.gov.my/index.php"
+    "?r=esolatApi/takwimsolat"
+)
+
+SOLAT_ZONES = {
+    "Johor": {
+        "JHR01": "Pulau Aur dan Pulau Pemanggil",
+        "JHR02": "Johor Bahru, Kota Tinggi, Mersing",
+        "JHR03": "Kluang, Pontian",
+        "JHR04": "Batu Pahat, Muar, Segamat, Gemas Johor",
+    },
+    "Kedah": {
+        "KDH01": "Kota Setar, Kubang Pasu, Pokok Sena",
+        "KDH02": "Kuala Muda, Yan, Pendang",
+        "KDH03": "Padang Terap, Sik",
+        "KDH04": "Baling",
+        "KDH05": "Bandar Baharu, Kulim",
+        "KDH06": "Langkawi",
+        "KDH07": "Gunung Jerai",
+    },
+    "Kelantan": {
+        "KTN01": "Bachok, Kota Bharu, Machang, Pasir Mas, Pasir Puteh, Tanah Merah, Tumpat, Kuala Krai",
+        "KTN03": "Gua Musang, Jeli",
+    },
+    "Melaka": {
+        "MLK01": "Seluruh Negeri Melaka",
+    },
+    "Negeri Sembilan": {
+        "NGS01": "Tampin, Jempol",
+        "NGS02": "Jelebu, Kuala Pilah, Port Dickson, Rembau, Seremban",
+    },
+    "Pahang": {
+        "PHG01": "Pulau Tioman",
+        "PHG02": "Kuantan, Pekan, Rompin, Muadzam Shah",
+        "PHG03": "Jerantut, Temerloh, Maran, Bera, Chenor, Jengka",
+        "PHG04": "Bentong, Lipis, Raub",
+        "PHG05": "Genting Sempah, Janda Baik, Bukit Tinggi",
+        "PHG06": "Cameron Highlands, Genting Highlands, Bukit Fraser",
+    },
+    "Perlis": {
+        "PLS01": "Kangar, Padang Besar, Arau",
+    },
+    "Pulau Pinang": {
+        "PNG01": "Seluruh Negeri Pulau Pinang",
+    },
+    "Perak": {
+        "PRK01": "Tapah, Slim River, Tanjung Malim",
+        "PRK02": "Kuala Kangsar, Sungai Siput, Ipoh, Batu Gajah, Kampar",
+    },
+    "Selangor": {
+        "SGR01": "Gombak, Petaling, Sepang, Hulu Langat, Hulu Selangor, Shah Alam",
+        "SGR02": "Kuala Selangor, Sabak Bernam",
+        "SGR03": "Klang, Kuala Langat",
+    },
+    "Sarawak": {
+        "SWK01": "Limbang, Lawas, Sundar, Trusan",
+        "SWK02": "Miri, Niah, Bekenu, Sibuti, Marudi",
+        "SWK03": "Pandan, Belaga, Suai, Tatau, Sebauh, Bintulu",
+        "SWK04": "Sibu, Mukah, Dalat, Song, Igan, Oya, Balingian, Kanowit, Kapit",
+        "SWK05": "Sarikei, Matu, Julau, Rajang, Daro, Bintangor, Belawai",
+        "SWK06": "Lubok Antu, Sri Aman, Roban, Debak, Kabong, Lingga, Engkilili, Betong, Spaoh, Pusa, Saratok",
+        "SWK07": "Serian, Simunjan, Samarahan, Sebuyau, Meludam",
+        "SWK08": "Kuching, Bau, Lundu, Sematan",
+        "SWK09": "Zon Khas Kampung Patarikan",
+    },
+    "Terengganu": {
+        "TRG01": "Kuala Terengganu, Marang, Kuala Nerus",
+        "TRG02": "Besut, Setiu",
+        "TRG03": "Hulu Terengganu",
+        "TRG04": "Dungun, Kemaman",
+    },
+    "Wilayah Persekutuan": {
+        "WLY01": "Kuala Lumpur, Putrajaya",
+        "WLY02": "Labuan",
+    },
+}
+
+
+def get_user_solat_zone(user_id):
+    users = load_users()
+    info = users.get(str(user_id), {})
+
+    zone = info.get("solat_zone")
+
+    if zone:
+        return zone
+
+    return None
+
+
+
+def get_user_solat_date(user_id):
+    users = load_users()
+    data = users.get(str(user_id), {})
+
+    saved = data.get("solat_date")
+
+    if saved:
+        try:
+            return datetime.strptime(
+                saved,
+                "%Y-%m-%d"
+            ).date()
+        except Exception:
+            pass
+
+    return datetime.now(
+        ZoneInfo("Asia/Kuala_Lumpur")
+    ).date()
+
+
+def set_user_solat_date(user_id, selected_date):
+    users = load_users()
+
+    user_id = str(user_id)
+
+    if user_id not in users:
+        users[user_id] = {}
+
+    users[user_id]["solat_date"] = selected_date.strftime(
+        "%Y-%m-%d"
+    )
+
+    save_users(users)
+
+
+
+def set_user_solat_zone(user_id, zone):
+    users = load_users()
+    user_id = str(user_id)
+
+    if user_id not in users:
+        users[user_id] = {
+            "name": "",
+            "username": "",
+            "status": "pending",
+        }
+
+    users[user_id]["solat_zone"] = zone
+
+    save_users(users)
+
+
+def get_zone_state(zone):
+    for state, zones in SOLAT_ZONES.items():
+        if zone in zones:
+            return state
+
+    return "Tidak diketahui"
+
+
+def get_zone_name(zone):
+    for state, zones in SOLAT_ZONES.items():
+        if zone in zones:
+            return zones[zone]
+
+    return "Tidak diketahui"
+
+
+def get_jakim_today(zone, selected_date=None):
+    url = (
+        JAKIM_SOLAT_API
+        + "&zone="
+        + zone
+        + "&period=today"
+    )
+
+    request = Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 Telegram-Solat-Bot"
+        },
+    )
+
+    with urlopen(request, timeout=20) as response:
+        raw = response.read().decode("utf-8")
+
+    data = json.loads(raw)
+
+    if data.get("status") != "OK!":
+        raise RuntimeError("JAKIM API tidak memberikan data.")
+
+    prayer = data.get("prayerTime", [])
+
+    if not prayer:
+        raise RuntimeError("Data waktu solat kosong.")
+
+    return prayer[0]
+
+
+def clean_time(value):
+    if not value:
+        return "--:--"
+
+    return str(value)[:5]
+
+
+def get_next_prayer(prayer):
+    from datetime import datetime
+
+    now = datetime.now(ZoneInfo("Asia/Kuala_Lumpur"))
+
+    prayers = [
+        ("Subuh", prayer.get("fajr")),
+        ("Zohor", prayer.get("dhuhr")),
+        ("Asar", prayer.get("asr")),
+        ("Maghrib", prayer.get("maghrib")),
+        ("Isyak", prayer.get("isha")),
+    ]
+
+    for name, value in prayers:
+        if not value:
+            continue
+
+        try:
+            hour, minute = map(
+                int,
+                value[:5].split(":"),
+            )
+        except Exception:
+            continue
+
+        prayer_time = now.replace(
+            hour=hour,
+            minute=minute,
+            second=0,
+            microsecond=0,
+        )
+
+        if prayer_time > now:
+            return name, clean_time(value)
+
+    return "Subuh", clean_time(prayer.get("fajr"))
+
+
+
+def solat_reminder_keyboard(enabled):
+    if enabled:
+        reminder_button = InlineKeyboardButton(
+            "🔕 Matikan Reminder",
+            callback_data="solat_reminder_off",
+        )
+    else:
+        reminder_button = InlineKeyboardButton(
+            "🔔 Hidupkan Reminder",
+            callback_data="solat_reminder_on",
+        )
+
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "📍 Tukar Lokasi",
+                    callback_data="solat_location",
+                ),
+                InlineKeyboardButton(
+                    "🔄 Refresh",
+                    callback_data="solat_refresh",
+                ),
+            ],
+            [
+                reminder_button,
+            ],
+            [
+                InlineKeyboardButton(
+                    "⬅️ Back",
+                    callback_data="solat_back",
+                ),
+                InlineKeyboardButton(
+                    "🏠 Home",
+                    callback_data="home",
+                ),
+            ],
+        ]
+    )
+
+
+def solat_menu_keyboard():
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "📍 Tukar Lokasi",
+                    callback_data="solat_location",
+                ),
+                InlineKeyboardButton(
+                    "🔄 Refresh",
+                    callback_data="solat_refresh",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "⬅️ Back",
+                    callback_data="solat_back",
+                ),
+                InlineKeyboardButton(
+                    "🏠 Home",
+                    callback_data="home",
+                ),
+            ],
+        ]
+    )
+
+
+def solat_state_keyboard():
+    states = list(SOLAT_ZONES.keys())
+
+    rows = []
+
+    for i in range(0, len(states), 2):
+        row = []
+
+        for state in states[i:i + 2]:
+            row.append(
+                InlineKeyboardButton(
+                    state,
+                    callback_data="solat_state_" + state,
+                )
+            )
+
+        rows.append(row)
+
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "⬅️ Back",
+                callback_data="solat_menu",
+            ),
+            InlineKeyboardButton(
+                "🏠 Home",
+                callback_data="home",
+            ),
+        ]
+    )
+
+    return InlineKeyboardMarkup(rows)
+
+
+def solat_zone_keyboard(state):
+    zones = SOLAT_ZONES.get(state, {})
+
+    rows = []
+
+    for zone, description in zones.items():
+        short_description = description
+
+        if len(short_description) > 48:
+            short_description = short_description[:45] + "..."
+
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"{zone} - {short_description}",
+                    callback_data="solat_zone_" + zone,
+                )
+            ]
+        )
+
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "⬅️ Negeri",
+                callback_data="solat_location",
+            ),
+            InlineKeyboardButton(
+                "🏠 Home",
+                callback_data="home",
+            ),
+        ]
+    )
+
+    return InlineKeyboardMarkup(rows)
+
+
+async def show_solat_menu(query):
+    user_id = query.from_user.id
+    zone = get_user_solat_zone(user_id)
+
+    if not zone:
+        await query.edit_message_text(
+            "🕌 <b>WAKTU SOLAT</b>\n\n"
+            "📍 Lokasi belum ditetapkan.\n\n"
+            "Sila pilih lokasi anda terlebih dahulu.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "📍 Pilih Lokasi",
+                            callback_data="solat_location",
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "🏠 Home",
+                            callback_data="home",
+                        )
+                    ],
+                ]
+            ),
+        )
+        return
+
+    selected_date = get_user_solat_date(user_id)
+
+    try:
+        prayer = await asyncio.to_thread(
+            get_jakim_today,
+            zone,
+            selected_date,
+        )
+    except Exception as error:
+        logger.exception(
+            "Gagal mengambil waktu solat JAKIM: %s",
+            error,
+        )
+
+        await query.edit_message_text(
+            "🕌 <b>WAKTU SOLAT</b>\n\n"
+            "❌ Gagal mendapatkan waktu solat.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "🔄 Cuba Lagi",
+                            callback_data="solat_refresh",
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "🏠 Home",
+                            callback_data="home",
+                        )
+                    ],
+                ]
+            ),
+        )
+        return
+
+    # =====================================================
+    # DATA API JAKIM
+    # =====================================================
+
+    if not isinstance(prayer, dict):
+        prayer = {}
+
+    # Nama negeri / zon
+    state = get_zone_state(zone)
+    zone_name = get_zone_name(zone)
+
+    # Ambil waktu daripada API
+    imsak = clean_time(prayer.get("imsak", "-"))
+    fajr = clean_time(
+        prayer.get("fajr", prayer.get("subuh", "-"))
+    )
+    syuruk = clean_time(prayer.get("syuruk", "-"))
+    dhuhr = clean_time(
+        prayer.get("dhuhr", prayer.get("zohor", "-"))
+    )
+    asr = clean_time(
+        prayer.get("asr", prayer.get("asar", "-"))
+    )
+    maghrib = clean_time(prayer.get("maghrib", "-"))
+    isha = clean_time(
+        prayer.get("isha", prayer.get("isyak", "-"))
+    )
+
+    # Kawasan zon
+    kawasan = SOLAT_ZONES.get(zone, {})
+
+    if isinstance(kawasan, dict):
+        kawasan_text = kawasan.get(
+            "name",
+            zone_name,
+        )
+    else:
+        kawasan_text = zone_name
+
+    # Jika get_zone_name sudah mengandungi kawasan penuh,
+    # gunakan nama tersebut.
+    if not kawasan_text:
+        kawasan_text = zone_name
+
+    # Tarikh yang dipilih
+    date_text = selected_date.strftime("%d-%b-%Y")
+
+    # Seterusnya
+    next_prayer = get_next_prayer(prayer)
+
+    if isinstance(next_prayer, tuple):
+        if len(next_prayer) >= 2:
+            next_name = str(next_prayer[0]).title()
+            next_time = clean_time(next_prayer[1])
+            next_text = (
+                f"⏭️ <b>Seterusnya:</b> "
+                f"{next_name} pada {next_time}"
+            )
+        else:
+            next_text = ""
+    elif next_prayer:
+        next_text = f"⏭️ <b>Seterusnya:</b> {next_prayer}"
+    else:
+        next_text = ""
+
+    message = (
+        "🕌 <b>WAKTU SOLAT</b>\n\n"
+        f"📍 <b>{state}</b>\n"
+        f"🗺️ Zon: <b>{zone}</b>\n"
+        f"📌 {kawasan_text}\n"
+        f"📅 <b>{date_text}</b>\n\n"
+        f"🌙 Imsak     <b>{imsak}</b>\n"
+        f"🌅 Subuh    <b>{fajr}</b>\n"
+        f"☀️ Syuruk   <b>{syuruk}</b>\n"
+        f"🕛 Zohor    <b>{dhuhr}</b>\n"
+        f"🌤️ Asar     <b>{asr}</b>\n"
+        f"🌇 Maghrib  <b>{maghrib}</b>\n"
+        f"🌙 Isyak    <b>{isha}</b>\n\n"
+    )
+
+    if next_text:
+        message += next_text + "\n\n"
+
+    message += (
+        "📡 Sumber: <b>e-Solat JAKIM</b>\n\n"
+        f"🔔 Reminder: "
+        f"<b>{'ON' if get_user_reminder_enabled(user_id) else 'OFF'}</b>"
+    )
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "◀️ Hari Sebelum",
+                callback_data="solat_prev",
+            ),
+            InlineKeyboardButton(
+                "Hari Selepas ▶️",
+                callback_data="solat_next",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "📅 Pilih Tarikh",
+                callback_data="solat_date",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🔄 Refresh",
+                callback_data="solat_refresh",
+            ),
+            InlineKeyboardButton(
+                "📍 Lokasi",
+                callback_data="solat_location",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "⬅️ Back",
+                callback_data="solat_back",
+            ),
+            InlineKeyboardButton(
+                "🏠 Home",
+                callback_data="home",
+            ),
+        ],
+    ]
+
+    await query.edit_message_text(
+        message,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def show_solat_states(query):
+    await query.edit_message_text(
+        "📍 <b>PILIH NEGERI</b>\n\n"
+        "Pilih negeri untuk melihat zon waktu solat:",
+        parse_mode="HTML",
+        reply_markup=solat_state_keyboard(),
+    )
+
+
+async def show_solat_zones(query, state):
+    if state not in SOLAT_ZONES:
+        await query.answer(
+            "Negeri tidak dijumpai.",
+            show_alert=True,
+        )
+        return
+
+    await query.edit_message_text(
+        f"📍 <b>{state}</b>\n\n"
+        "Pilih zon kawasan anda:",
+        parse_mode="HTML",
+        reply_markup=solat_zone_keyboard(state),
+    )
+
+
+async def select_solat_zone(query, zone):
+    valid = any(
+        zone in zones
+        for zones in SOLAT_ZONES.values()
+    )
+
+    if not valid:
+        await query.answer(
+            "Zon tidak sah.",
+            show_alert=True,
+        )
+        return
+
+    set_user_solat_zone(
+        query.from_user.id,
+        zone,
+    )
+
+    await query.answer(
+        f"✅ Lokasi disimpan: {zone}",
+        show_alert=False,
+    )
+
+    await show_solat_menu(query)
+
+
 def main_keyboard():
     selected = get_selected_server()
 
@@ -376,8 +1398,20 @@ def main_keyboard():
         ],
         [
             InlineKeyboardButton(
+                "🖥️ Status Server",
+                callback_data="server_status",
+            )
+        ],
+        [
+            InlineKeyboardButton(
                 "🛡️ Pi-hole",
                 callback_data="pihole_menu",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "📱 APK Manager",
+                callback_data="apk_menu",
             )
         ],
     ]
@@ -388,6 +1422,55 @@ def main_keyboard():
 # =========================================================
 # HOME MESSAGE
 # =========================================================
+
+
+# Tambah butang Waktu Solat tanpa mengubah menu asal.
+_original_main_keyboard_for_solat = main_keyboard
+
+
+def main_keyboard(user_id=None):
+    keyboard = _original_main_keyboard_for_solat()
+
+    rows = [
+        list(row)
+        for row in keyboard.inline_keyboard
+    ]
+
+    # 🕌 Waktu Solat
+    if not any(
+        button.callback_data == "solat_menu"
+        for row in rows
+        for button in row
+        if button.callback_data
+    ):
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "🕌 Waktu Solat",
+                    callback_data="solat_menu",
+                )
+            ]
+        )
+
+    # 👥 Manage Users - ADMIN SAHAJA
+    if user_id is not None and is_admin(user_id):
+        if not any(
+            button.callback_data == "admin_users"
+            for row in rows
+            for button in row
+            if button.callback_data
+        ):
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        "👥 Manage Users",
+                        callback_data="admin_users",
+                    )
+                ]
+            )
+
+    return InlineKeyboardMarkup(rows)
+
 
 def home_text():
     selected = get_selected_server()
@@ -1130,9 +2213,309 @@ async def set_pihole_protection(query, enabled):
     )
 
 
+
+# =========================================================
+# APK MANAGER
+# =========================================================
+
+APK_DIR = "/home/azam/apk-manager/apk"
+
+
+def get_apk_files():
+    apk_dir = Path(APK_DIR)
+
+    if not apk_dir.exists():
+        return []
+
+    return sorted(
+        [
+            file
+            for file in apk_dir.iterdir()
+            if file.is_file() and file.suffix.lower() == ".apk"
+        ],
+        key=lambda x: x.name.lower(),
+    )
+
+
+def apk_menu_keyboard():
+    apk_files = get_apk_files()
+
+    keyboard = []
+
+    for index, apk in enumerate(apk_files):
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    f"📦 {apk.stem}",
+                    callback_data=f"apk_file_{index}",
+                )
+            ]
+        )
+
+    keyboard.append(
+        [
+            InlineKeyboardButton(
+                "🔄 Refresh",
+                callback_data="apk_menu",
+            )
+        ]
+    )
+
+    keyboard.append(
+        [
+            InlineKeyboardButton(
+                "⬅️ Back",
+                callback_data="home",
+            )
+        ]
+    )
+
+    return InlineKeyboardMarkup(keyboard)
+
+
+async def show_apk_menu(query):
+    apk_files = get_apk_files()
+
+    if not apk_files:
+        await query.edit_message_text(
+            "📱 <b>APK MANAGER</b>\n\n"
+            "❌ Tiada APK dalam library.\n\n"
+            f"📂 Folder:\n<code>{APK_DIR}</code>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "🔄 Refresh",
+                            callback_data="apk_menu",
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ Back",
+                            callback_data="home",
+                        )
+                    ],
+                ]
+            ),
+        )
+        return
+
+    await query.edit_message_text(
+        "📱 <b>APK MANAGER</b>\n\n"
+        f"📦 Jumlah APK: <b>{len(apk_files)}</b>\n\n"
+        "Pilih aplikasi:",
+        parse_mode="HTML",
+        reply_markup=apk_menu_keyboard(),
+    )
+
+
+async def show_apk_file(query, index):
+    apk_files = get_apk_files()
+
+    try:
+        index = int(index)
+        apk = apk_files[index]
+    except (ValueError, IndexError):
+        await query.edit_message_text(
+            "❌ APK tidak dijumpai.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ APK Manager",
+                            callback_data="apk_menu",
+                        )
+                    ]
+                ]
+            ),
+        )
+        return
+
+    size_mb = apk.stat().st_size / (1024 * 1024)
+
+    await query.edit_message_text(
+        "📦 <b>APK INFO</b>\n\n"
+        f"📱 Nama: <b>{apk.stem}</b>\n"
+        f"📄 Fail: <code>{apk.name}</code>\n"
+        f"💾 Saiz: <b>{size_mb:.1f} MB</b>\n\n"
+        "Pilih tindakan:",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "⬇️ Download APK",
+                        callback_data=f"apk_download_{index}",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "⬅️ APK Manager",
+                        callback_data="apk_menu",
+                    ),
+                    InlineKeyboardButton(
+                        "🏠 Home",
+                        callback_data="home",
+                    ),
+                ],
+            ]
+        ),
+    )
+
+
+async def send_apk(query, context, index):
+    apk_files = get_apk_files()
+
+    try:
+        index = int(index)
+        apk = apk_files[index]
+    except (ValueError, IndexError):
+        await query.edit_message_text(
+            "❌ APK tidak dijumpai.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ APK Manager",
+                            callback_data="apk_menu",
+                        )
+                    ]
+                ]
+            ),
+        )
+        return
+
+    await query.edit_message_text(
+        "📦 <b>APK MANAGER</b>\n\n"
+        f"📱 <b>{apk.stem}</b>\n"
+        "⏳ <i>Sedang hantar APK...</i>",
+        parse_mode="HTML",
+    )
+
+    try:
+        with open(apk, "rb") as apk_file:
+            await context.bot.send_document(
+                chat_id=query.message.chat_id,
+                document=apk_file,
+                filename=apk.name,
+                caption=f"📱 <b>{apk.stem}</b>",
+                parse_mode="HTML",
+            )
+
+        await query.edit_message_text(
+            "✅ <b>APK berjaya dihantar.</b>\n\n"
+            f"📱 {apk.stem}",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ APK Manager",
+                            callback_data="apk_menu",
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "🏠 Home",
+                            callback_data="home",
+                        )
+                    ],
+                ]
+            ),
+        )
+
+    except Exception as error:
+        logger.exception("Gagal hantar APK")
+
+        await query.edit_message_text(
+            "❌ <b>Gagal menghantar APK.</b>\n\n"
+            f"<code>{error}</code>",
+            parse_mode="HTML",
+        )
+
+
 # =========================================================
 # CALLBACK HANDLER
 # =========================================================
+
+
+async def show_solat_date_menu(query):
+    selected_date = get_user_solat_date(
+        query.from_user.id
+    )
+
+    text = (
+        "📅 <b>PILIH TARIKH</b>\n\n"
+        f"Tarikh semasa: "
+        f"<b>{selected_date.strftime('%d/%m/%Y')}</b>\n\n"
+        "Pilih perubahan tarikh:"
+    )
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "◀️ -7 Hari",
+                callback_data="solat_date_-7",
+            ),
+            InlineKeyboardButton(
+                "◀️ -1 Hari",
+                callback_data="solat_date_-1",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "Hari Ini",
+                callback_data="solat_date_0",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "+1 Hari ▶️",
+                callback_data="solat_date_1",
+            ),
+            InlineKeyboardButton(
+                "+7 Hari ▶️",
+                callback_data="solat_date_7",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "⬅️ Kembali",
+                callback_data="solat_refresh",
+            ),
+        ],
+    ]
+
+    await query.edit_message_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def change_solat_date(query, days):
+    current = get_user_solat_date(
+        query.from_user.id
+    )
+
+    if days == 0:
+        new_date = datetime.now(
+            ZoneInfo("Asia/Kuala_Lumpur")
+        ).date()
+    else:
+        new_date = current + timedelta(days=days)
+
+    set_user_solat_date(
+        query.from_user.id,
+        new_date,
+    )
+
+    await show_solat_menu(query)
+
+
 
 async def button_handler(
     update: Update,
@@ -1143,6 +2526,118 @@ async def button_handler(
     query = update.callback_query
     callback = query.data
 
+
+    if callback == "server_status":
+        await show_server_status(query)
+        return
+
+    # =====================================================
+    # SOLAT CALLBACKS
+    # =====================================================
+
+    if callback == "solat_reminder_on":
+        if not is_approved(query.from_user.id):
+            await query.answer(
+                "🚫 Akses diperlukan.",
+                show_alert=True,
+            )
+            return
+
+        set_user_reminder_enabled(
+            query.from_user.id,
+            True,
+        )
+
+        await query.answer(
+            "🔔 Reminder dihidupkan.",
+            show_alert=True,
+        )
+
+        await show_solat_menu(query)
+        return
+
+    if callback == "solat_reminder_off":
+        if not is_approved(query.from_user.id):
+            await query.answer(
+                "🚫 Akses diperlukan.",
+                show_alert=True,
+            )
+            return
+
+        set_user_reminder_enabled(
+            query.from_user.id,
+            False,
+        )
+
+        await query.answer(
+            "🔕 Reminder dimatikan.",
+            show_alert=True,
+        )
+
+        await show_solat_menu(query)
+        return
+
+
+    if callback == "solat_menu":
+        await show_solat_menu(query)
+        return
+
+    if callback == "solat_refresh":
+        await show_solat_menu(query)
+        return
+
+    if callback == "solat_date":
+        await show_solat_date_menu(query)
+        return
+
+    if callback == "solat_prev":
+        await change_solat_date(query, -1)
+        return
+
+    if callback == "solat_next":
+        await change_solat_date(query, 1)
+        return
+
+    if callback.startswith("solat_date_"):
+        value = callback.replace(
+            "solat_date_", "", 1
+        )
+
+        try:
+            days = int(value)
+        except ValueError:
+            days = 0
+
+        await change_solat_date(query, days)
+        return
+
+    if callback == "solat_location":
+        await show_solat_states(query)
+        return
+
+    if callback.startswith("solat_state_"):
+        state = callback.replace(
+            "solat_state_", "", 1
+        )
+        await show_solat_zones(query, state)
+        return
+
+    if callback.startswith("solat_zone_"):
+        zone = callback.replace(
+            "solat_zone_", "", 1
+        )
+        await select_solat_zone(query, zone)
+        return
+
+    if callback == "solat_back":
+        await query.edit_message_text(
+            home_text(),
+            parse_mode="HTML",
+            reply_markup=main_keyboard(query.from_user.id),
+        )
+        return
+
+
     try:
         await query.answer()
     except Exception as error:
@@ -1150,6 +2645,72 @@ async def button_handler(
             "Callback expired: %s",
             error,
         )
+
+    # =====================================================
+    # USER APPROVAL SYSTEM
+    # =====================================================
+
+    if callback == "request_access":
+        await handle_access_request(query, context)
+        return
+
+    if callback == "admin_users":
+        await show_admin_users(query)
+        return
+
+    if callback.startswith("approve_user_"):
+        target_id = callback.replace(
+            "approve_user_", "", 1
+        )
+        await approve_user(
+            query,
+            context,
+            target_id,
+        )
+        return
+
+    if callback.startswith("reject_user_"):
+        target_id = callback.replace(
+            "reject_user_", "", 1
+        )
+        await reject_user(
+            query,
+            context,
+            target_id,
+        )
+        return
+
+    # Semua fungsi bot selepas ini hanya untuk
+    # approved users atau admin.
+    if not is_approved(query.from_user.id):
+        await show_access_denied(query)
+        return
+
+    if callback == "apk_nuvio":
+        await show_nuvio(query)
+        return
+
+    if callback == "apk_download_nuvio":
+        await send_nuvio(query, context)
+        return
+
+    # =====================================================
+    # APK MANAGER
+    # =====================================================
+
+    if callback == "apk_menu":
+        await show_apk_menu(query)
+        return
+
+    if callback.startswith("apk_file_"):
+        index = callback.replace("apk_file_", "", 1)
+        await show_apk_file(query, index)
+        return
+
+    if callback.startswith("apk_download_"):
+        index = callback.replace("apk_download_", "", 1)
+        await send_apk(query, context, index)
+        return
 
     # =====================================================
     # HOME
@@ -1167,7 +2728,7 @@ async def button_handler(
         await query.edit_message_text(
             home_text(),
             parse_mode="HTML",
-            reply_markup=main_keyboard(),
+            reply_markup=main_keyboard(query.from_user.id),
         )
         return
 
@@ -1187,7 +2748,7 @@ async def button_handler(
         await query.edit_message_text(
             home_text(),
             parse_mode="HTML",
-            reply_markup=main_keyboard(),
+            reply_markup=main_keyboard(query.from_user.id),
         )
         return
 
@@ -1207,7 +2768,7 @@ async def button_handler(
         await query.edit_message_text(
             home_text(),
             parse_mode="HTML",
-            reply_markup=main_keyboard(),
+            reply_markup=main_keyboard(query.from_user.id),
         )
         return
 
@@ -1521,7 +3082,7 @@ async def button_handler(
             "\n"
             "Auto Speedtest tidak lagi berjalan.",
             parse_mode="HTML",
-            reply_markup=main_keyboard(),
+            reply_markup=main_keyboard(query.from_user.id),
         )
 
         return
@@ -1656,6 +3217,731 @@ async def auto_speedtest_job(
         auto_task = None
 
 
+
+# =========================================================
+# SOLAT REMINDER V2
+# =========================================================
+
+SOLAT_REMINDER_NAMES = {
+    "fajr": "Subuh",
+    "dhuhr": "Zohor",
+    "asr": "Asar",
+    "maghrib": "Maghrib",
+    "isha": "Isyak",
+}
+
+solat_reminder_task = None
+
+
+def get_user_reminder_enabled(user_id):
+    users = load_users()
+    info = users.get(str(user_id), {})
+
+    # Default ON untuk user yang telah approved.
+    return info.get("solat_reminder", True)
+
+
+def set_user_reminder_enabled(user_id, enabled):
+    users = load_users()
+    user_id = str(user_id)
+
+    if user_id not in users:
+        return
+
+    users[user_id]["solat_reminder"] = bool(enabled)
+
+    save_users(users)
+
+
+def get_reminder_log(user_id):
+    users = load_users()
+    info = users.get(str(user_id), {})
+
+    log = info.get("solat_reminder_log", [])
+
+    if not isinstance(log, list):
+        return []
+
+    return log
+
+
+def save_reminder_log(user_id, key):
+    users = load_users()
+    user_id = str(user_id)
+
+    if user_id not in users:
+        return
+
+    log = users[user_id].get(
+        "solat_reminder_log",
+        [],
+    )
+
+    if not isinstance(log, list):
+        log = []
+
+    if key not in log:
+        log.append(key)
+
+    # Simpan 100 rekod terakhir sahaja.
+    users[user_id]["solat_reminder_log"] = log[-100:]
+
+    save_users(users)
+
+
+async def send_solat_reminder(
+    application,
+    user_id,
+    zone,
+    prayer_name,
+    prayer_time,
+    minutes_before,
+    kawasan=None,
+):
+    # Nama kawasan mengikut zon pengguna.
+    if not kawasan:
+        kawasan = zone
+
+    # Tukar nama waktu kepada format yang lebih cantik.
+    prayer_title = prayer_name.upper()
+
+    # Format waktu 24 jam -> 12 jam.
+    try:
+        hour, minute = map(int, prayer_time[:5].split(":"))
+        suffix = "pagi" if hour < 12 else "petang"
+        if hour >= 19:
+            suffix = "malam"
+
+        display_hour = hour % 12
+        if display_hour == 0:
+            display_hour = 12
+
+        display_time = f"{display_hour:02d}:{minute:02d} {suffix}"
+    except Exception:
+        display_time = prayer_time[:5]
+
+    if minutes_before == 5:
+        message = (
+            f"🔔 <b>WAKTU SOLAT {prayer_title} AKAN TIBA</b>\n\n"
+            "Bersiaplah untuk menunaikan solat dan hentikan seketika "
+            "urusan dunia untuk menghadap Yang Maha Esa.\n\n"
+            f"⏰ Lagi: <b>5 minit</b>\n"
+            f"🕐 Waktu: <b>{display_time}</b>\n"
+            f"📍 Kawasan: <b>{kawasan}</b>\n"
+            f"🕌 Zon: <code>{zone}</code>\n\n"
+            "🤲 Semoga dipermudahkan untuk menunaikan solat pada waktunya."
+        )
+    else:
+        message = (
+            f"🕌 <b>WAKTU SOLAT {prayer_title} TELAH TIBA</b>\n\n"
+            "Seruan azan telah berkumandang. Mari hentikan seketika "
+            "urusan dunia untuk menghadap Yang Maha Esa.\n\n"
+            f"⏰ Waktu: <b>{display_time}</b>\n"
+            f"📍 Kawasan: <b>{kawasan}</b>\n"
+            f"🕌 Zon: <code>{zone}</code>\n\n"
+            "📖 <i>“Amalan yang paling disukai Allah ialah solat pada waktunya.”</i>\n"
+            "Hadis Riwayat Bukhari & Muslim\n\n"
+            "✨ <b>Jom tunaikan solat pada waktunya.</b>\n"
+            "Semoga Allah menerima segala amal ibadah kita. 🤲\n"
+            "──────────────────────\n"
+            "🤖 <i>Ikhlas dari Bot Speedtest</i>"
+        )
+
+    try:
+        await application.bot.send_message(
+            chat_id=int(user_id),
+            text=message,
+            parse_mode="HTML",
+        )
+
+        logger.info(
+            "Solat reminder dihantar: user=%s zone=%s prayer=%s offset=%s",
+            user_id,
+            zone,
+            prayer_name,
+            minutes_before,
+        )
+
+        return True
+
+    except Exception as error:
+        logger.warning(
+            "Gagal hantar solat reminder user %s: %s",
+            user_id,
+            error,
+        )
+
+        return False
+
+
+async def check_solat_reminders(application):
+    users = load_users()
+
+    if not users:
+        return
+
+    now = datetime.now(
+        ZoneInfo("Asia/Kuala_Lumpur")
+    )
+
+    today = now.strftime("%Y-%m-%d")
+
+    # Cache supaya satu zon hanya request JAKIM sekali
+    # untuk setiap pusingan.
+    zone_cache = {}
+
+    for user_id, info in users.items():
+
+        try:
+            numeric_user_id = int(user_id)
+        except Exception:
+            continue
+
+        # Hanya approved user.
+        if not is_approved(numeric_user_id):
+            continue
+
+        # Reminder OFF.
+        if not info.get(
+            "solat_reminder",
+            True,
+        ):
+            continue
+
+        zone = info.get("solat_zone")
+
+        if not zone:
+            continue
+
+        # Dapatkan nama kawasan berdasarkan zon pengguna.
+        kawasan = get_zone_name(zone)
+
+        # Ambil data JAKIM untuk zon.
+        if zone not in zone_cache:
+
+            try:
+                zone_cache[zone] = await asyncio.to_thread(
+                    get_jakim_today,
+                    zone,
+                )
+
+            except Exception as error:
+                logger.warning(
+                    "JAKIM gagal untuk zon %s: %s",
+                    zone,
+                    error,
+                )
+
+                zone_cache[zone] = None
+
+        prayer = zone_cache.get(zone)
+
+        if not prayer:
+            continue
+
+        reminder_log = get_reminder_log(
+            numeric_user_id
+        )
+
+        for prayer_key, prayer_name in SOLAT_REMINDER_NAMES.items():
+
+            prayer_time = prayer.get(prayer_key)
+
+            if not prayer_time:
+                continue
+
+            try:
+                hour, minute = map(
+                    int,
+                    prayer_time[:5].split(":"),
+                )
+
+                prayer_datetime = now.replace(
+                    hour=hour,
+                    minute=minute,
+                    second=0,
+                    microsecond=0,
+                )
+
+            except Exception:
+                continue
+
+            diff = (
+                prayer_datetime - now
+            ).total_seconds()
+
+            # =============================================
+            # 5 MINIT SEBELUM
+            # =============================================
+
+            if 300 <= diff < 360:
+
+                key = (
+                    f"{today}|{zone}|"
+                    f"{prayer_key}|5"
+                )
+
+                if key not in reminder_log:
+
+                    sent = await send_solat_reminder(
+                        application,
+                        numeric_user_id,
+                        zone,
+                        prayer_name,
+                        prayer_time,
+                        5,
+                        kawasan,
+                    )
+
+                    if sent:
+                        save_reminder_log(
+                            numeric_user_id,
+                            key,
+                        )
+
+            # =============================================
+            # TEPAT MASUK WAKTU
+            # =============================================
+
+            elif 0 <= diff < 60:
+
+                key = (
+                    f"{today}|{zone}|"
+                    f"{prayer_key}|0"
+                )
+
+                if key not in reminder_log:
+
+                    sent = await send_solat_reminder(
+                        application,
+                        numeric_user_id,
+                        zone,
+                        prayer_name,
+                        prayer_time,
+                        0,
+                        kawasan,
+                    )
+
+                    if sent:
+                        save_reminder_log(
+                            numeric_user_id,
+                            key,
+                        )
+
+
+async def solat_reminder_loop(application):
+    global solat_reminder_task
+
+    logger.info(
+        "🕌 Solat reminder background task bermula."
+    )
+
+    # Beri masa bot siap terlebih dahulu.
+    await asyncio.sleep(10)
+
+    while True:
+
+        try:
+            await check_solat_reminders(
+                application
+            )
+
+        except asyncio.CancelledError:
+            logger.info(
+                "Solat reminder task dihentikan."
+            )
+            raise
+
+        except Exception as error:
+            logger.exception(
+                "Error dalam solat reminder: %s",
+                error,
+            )
+
+        # Semak setiap 30 saat.
+        await asyncio.sleep(30)
+
+
+async def start_solat_reminder(application):
+    global solat_reminder_task
+
+    if solat_reminder_task is not None:
+        if not solat_reminder_task.done():
+            return
+
+    solat_reminder_task = asyncio.create_task(
+        solat_reminder_loop(application)
+    )
+
+
+async def stop_solat_reminder(application):
+    global solat_reminder_task
+
+    if solat_reminder_task is not None:
+
+        solat_reminder_task.cancel()
+
+        try:
+            await solat_reminder_task
+
+        except asyncio.CancelledError:
+            pass
+
+        solat_reminder_task = None
+
+
+async def setup_bot_commands(application):
+    commands = [
+        ("start", "Mula Bot"),
+        ("speedtest", "Jalankan Speedtest"),
+        ("solat", "Waktu Solat"),
+        ("status", "Status Bot"),
+        ("server", "Status Server"),
+        ("help", "Bantuan"),
+    ]
+
+    await application.bot.set_my_commands(commands)
+
+    logger.info(
+        "📋 Telegram command menu berjaya ditetapkan."
+    )
+
+
+async def post_init(application):
+    await setup_bot_commands(application)
+
+    await start_solat_reminder(
+        application
+    )
+
+    logger.info(
+        "🕌 Waktu Solat reminder diaktifkan."
+    )
+
+
+async def post_shutdown(application):
+    await stop_solat_reminder(
+        application
+    )
+
+    logger.info(
+        "🕌 Waktu Solat reminder dihentikan."
+    )
+
+
+
+# =========================================================
+# SERVER STATUS SYSTEM
+# =========================================================
+
+def get_server_ip():
+    try:
+        result = subprocess.run(
+            [
+                "hostname",
+                "-I",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
+        ips = result.stdout.strip().split()
+
+        for ip in ips:
+            if "." in ip:
+                return ip
+
+        return "N/A"
+
+    except Exception:
+        return "N/A"
+
+
+def get_ram_usage():
+    try:
+        result = subprocess.run(
+            [
+                "free",
+                "-m",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
+        lines = result.stdout.splitlines()
+
+        for line in lines:
+            if line.startswith("Mem:"):
+                parts = line.split()
+
+                total = int(parts[1])
+                used = int(parts[2])
+
+                percent = round(
+                    used / total * 100
+                )
+
+                return percent
+
+        return 0
+
+    except Exception:
+        return 0
+
+
+def get_cpu_usage():
+    try:
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                "top -bn1 | grep 'Cpu(s)'",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
+        line = result.stdout.strip()
+
+        if not line:
+            return 0
+
+        import re
+
+        match = re.search(
+            r"(\d+(?:\.\d+)?)\s*id",
+            line,
+        )
+
+        if match:
+            idle = float(match.group(1))
+            return round(100 - idle)
+
+        return 0
+
+    except Exception:
+        return 0
+
+
+def get_storage_usage():
+    try:
+        result = subprocess.run(
+            [
+                "df",
+                "-h",
+                "/",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
+        lines = result.stdout.strip().splitlines()
+
+        if len(lines) < 2:
+            return "N/A"
+
+        parts = lines[-1].split()
+
+        total = parts[1]
+        used = parts[2]
+        percent = parts[4]
+
+        return f"{used} / {total} ({percent})"
+
+    except Exception:
+        return "N/A"
+
+
+def get_uptime():
+    try:
+        result = subprocess.run(
+            [
+                "uptime",
+                "-p",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
+        value = result.stdout.strip()
+
+        if value.startswith("up "):
+            value = value[3:]
+
+        return value
+
+    except Exception:
+        return "N/A"
+
+
+def get_temperature():
+    try:
+        thermal_file = Path(
+            "/sys/class/thermal/thermal_zone0/temp"
+        )
+
+        if thermal_file.exists():
+
+            raw = thermal_file.read_text().strip()
+
+            temp = int(raw) / 1000
+
+            return f"{temp:.1f}°C"
+
+    except Exception:
+        pass
+
+    try:
+        result = subprocess.run(
+            [
+                "vcgencmd",
+                "measure_temp",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
+        value = result.stdout.strip()
+
+        if value:
+            return value.replace(
+                "temp=",
+                "",
+            )
+
+    except Exception:
+        pass
+
+    return "N/A"
+
+
+def get_pihole_running():
+    try:
+        result = subprocess.run(
+            [
+                "systemctl",
+                "is-active",
+                "--quiet",
+                "pihole-FTL",
+            ],
+            timeout=5,
+        )
+
+        if result.returncode == 0:
+            return "🟢 RUNNING"
+
+    except Exception:
+        pass
+
+    try:
+        result = subprocess.run(
+            [
+                "systemctl",
+                "is-active",
+                "--quiet",
+                "pihole-FTL.service",
+            ],
+            timeout=5,
+        )
+
+        if result.returncode == 0:
+            return "🟢 RUNNING"
+
+    except Exception:
+        pass
+
+    return "🔴 NOT RUNNING"
+
+
+def get_server_status_text():
+    device = socket.gethostname()
+    ip = get_server_ip()
+    ram = get_ram_usage()
+    cpu = get_cpu_usage()
+    storage = get_storage_usage()
+    uptime = get_uptime()
+    temperature = get_temperature()
+    pihole = get_pihole_running()
+
+    current_time = datetime.now(
+        ZoneInfo("Asia/Kuala_Lumpur")
+    ).strftime("%H:%M:%S")
+
+    return (
+        "🍓 <b>STATUS SERVER</b>\n\n"
+        f"🖥️ <b>Device</b>       : {device}\n"
+        f"🌐 <b>IP Address</b>   : {ip}\n"
+        f"🧠 <b>RAM Usage</b>    : {ram}%\n"
+        f"⚙️ <b>CPU Usage</b>    : {cpu}%\n"
+        f"💾 <b>Storage</b>      : {storage}\n"
+        f"🕐 <b>Time</b>         : {current_time}\n"
+        f"⏱️ <b>Uptime</b>       : {uptime}\n"
+        f"🌡️ <b>Temperature</b>  : {temperature}\n"
+        f"🛡️ <b>Pi-hole</b>      : {pihole}"
+    )
+
+
+def server_status_keyboard():
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "🔄 Refresh",
+                    callback_data="server_status",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "⬅️ Back",
+                    callback_data="home",
+                ),
+                InlineKeyboardButton(
+                    "🏠 Home",
+                    callback_data="home",
+                ),
+            ],
+        ]
+    )
+
+
+async def show_server_status(query):
+
+    if not is_approved(query.from_user.id):
+        await show_access_denied(query)
+        return
+
+    try:
+        status_text = await asyncio.to_thread(
+            get_server_status_text
+        )
+
+        await query.edit_message_text(
+            status_text,
+            parse_mode="HTML",
+            reply_markup=server_status_keyboard(),
+        )
+
+    except Exception as error:
+
+        logger.exception(
+            "Gagal mendapatkan server status: %s",
+            error,
+        )
+
+        await query.edit_message_text(
+            "🍓 <b>STATUS SERVER</b>\n\n"
+            "❌ Gagal mendapatkan status server.",
+            parse_mode="HTML",
+            reply_markup=server_status_keyboard(),
+        )
+
+
 # =========================================================
 # /START
 # =========================================================
@@ -1664,16 +3950,290 @@ async def start_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
+    user = update.effective_user
+
+    register_user(user)
+
+    if not is_approved(user.id):
+        await send_access_request(update, context)
+        return
+
+    keyboard = main_keyboard()
+
+    if is_admin(user.id):
+        rows = list(keyboard.inline_keyboard)
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "👥 Manage Users",
+                    callback_data="admin_users",
+                )
+            ]
+        )
+        keyboard = InlineKeyboardMarkup(rows)
+
     await update.message.reply_text(
         home_text(),
         parse_mode="HTML",
-        reply_markup=main_keyboard(),
+        reply_markup=keyboard,
     )
 
 
 # =========================================================
 # ERROR HANDLER
 # =========================================================
+
+
+async def solat_command(update, context):
+    """Paparkan Waktu Solat terus melalui /solat."""
+    user_id = update.effective_user.id
+    zone = get_user_solat_zone(user_id)
+
+    if not zone:
+        await update.message.reply_text(
+            "🕌 <b>WAKTU SOLAT</b>\n\n"
+            "📍 Lokasi belum ditetapkan.\n\n"
+            "Sila buka menu <b>🕌 Waktu Solat</b> untuk pilih lokasi "
+            "anda terlebih dahulu.",
+            parse_mode="HTML",
+        )
+        return
+
+    selected_date = get_user_solat_date(user_id)
+
+    try:
+        prayer = await asyncio.to_thread(
+            get_jakim_today,
+            zone,
+            selected_date,
+        )
+    except Exception as error:
+        logger.exception(
+            "Gagal mengambil waktu solat JAKIM melalui /solat: %s",
+            error,
+        )
+
+        await update.message.reply_text(
+            "🕌 <b>WAKTU SOLAT</b>\n\n"
+            "❌ Gagal mendapatkan waktu solat.\n"
+            "🔄 Sila cuba lagi sebentar lagi.",
+            parse_mode="HTML",
+        )
+        return
+
+    if not isinstance(prayer, dict):
+        prayer = {}
+
+    state = get_zone_state(zone)
+    zone_name = get_zone_name(zone)
+
+    imsak = clean_time(prayer.get("imsak", "-"))
+    fajr = clean_time(prayer.get("fajr", prayer.get("subuh", "-")))
+    syuruk = clean_time(prayer.get("syuruk", "-"))
+    dhuhr = clean_time(prayer.get("dhuhr", prayer.get("zohor", "-")))
+    asr = clean_time(prayer.get("asr", prayer.get("asar", "-")))
+    maghrib = clean_time(prayer.get("maghrib", "-"))
+    isha = clean_time(prayer.get("isha", prayer.get("isyak", "-")))
+
+    kawasan = SOLAT_ZONES.get(zone, {})
+
+    if isinstance(kawasan, dict):
+        kawasan_text = kawasan.get("name", zone_name)
+    else:
+        kawasan_text = str(kawasan)
+
+    # Cuba dapatkan tarikh paparan daripada data JAKIM
+    date_text = selected_date.strftime("%d-%b-%Y")
+
+    message = (
+        "🕌 <b>WAKTU SOLAT</b>\n\n"
+        f"📍 <b>{state}</b>\n"
+        f"🗺️ Zon: <b>{zone}</b>\n"
+        f"📌 {kawasan_text}\n"
+        f"📅 {date_text}\n\n"
+        f"🌙 Imsak     {imsak}\n"
+        f"🌅 Subuh     {fajr}\n"
+        f"☀️ Syuruk    {syuruk}\n"
+        f"🕛 Zohor     {dhuhr}\n"
+        f"🌤️ Asar      {asr}\n"
+        f"🌇 Maghrib   {maghrib}\n"
+        f"🌙 Isyak     {isha}\n\n"
+        "📡 Sumber: e-Solat JAKIM"
+    )
+
+    await update.message.reply_text(
+        message,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "📅 Tukar Tarikh",
+                        callback_data="solat_date",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "📍 Tukar Lokasi",
+                        callback_data="solat_location",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "🔄 Refresh",
+                        callback_data="solat_refresh",
+                    ),
+                    InlineKeyboardButton(
+                        "🏠 Home",
+                        callback_data="home",
+                    ),
+                ],
+            ]
+        ),
+    )
+
+
+async def speedtest_command(
+    update,
+    context,
+):
+    """Jalankan Speedtest melalui /speedtest."""
+    user_id = update.effective_user.id
+
+    try:
+        await update.message.reply_text(
+            "⚡ <b>SPEEDTEST</b>\n\n"
+            "⏳ Sedang menjalankan Speedtest...\n"
+            "🌐 Sila tunggu sebentar.",
+            parse_mode="HTML",
+        )
+
+        result = await asyncio.to_thread(
+            run_speedtest
+        )
+
+        if not isinstance(result, dict):
+            result = {
+                "error": "Keputusan Speedtest tidak sah."
+            }
+
+        message = format_result(result)
+
+        await update.message.reply_text(
+            message,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+
+        logger.info(
+            "Speedtest /speedtest berjaya untuk user %s",
+            user_id,
+        )
+
+    except Exception as error:
+        logger.exception(
+            "Speedtest command error: %s",
+            error,
+        )
+
+        await update.message.reply_text(
+            "❌ <b>SPEEDTEST GAGAL</b>\n\n"
+            "Sila cuba lagi sebentar lagi.",
+            parse_mode="HTML",
+        )
+
+
+async def status_command(
+    update,
+    context,
+):
+    """Paparkan status ringkas bot."""
+    user_id = update.effective_user.id
+
+    try:
+        approved = is_approved(user_id)
+
+        if is_admin(user_id):
+            access_text = "👑 Admin"
+        elif approved:
+            access_text = "🟢 Approved"
+        else:
+            access_text = "🟡 Pending"
+
+        await update.message.reply_text(
+            "🤖 <b>STATUS BOT</b>\n\n"
+            "🟢 Bot: <b>RUNNING</b>\n"
+            f"👤 Access: <b>{access_text}</b>\n"
+            "⚡ Speedtest: <b>READY</b>\n"
+            "🕌 Waktu Solat: <b>READY</b>\n"
+            "🖥️ Server Status: <b>READY</b>\n\n"
+            "📡 Telegram connection aktif.",
+            parse_mode="HTML",
+        )
+
+    except Exception as error:
+        logger.exception(
+            "Status command error: %s",
+            error,
+        )
+
+        await update.message.reply_text(
+            "🤖 <b>STATUS BOT</b>\n\n"
+            "❌ Gagal mendapatkan status.",
+            parse_mode="HTML",
+        )
+
+
+async def server_command(
+    update,
+    context,
+):
+    """Paparkan status Raspberry Pi melalui /server."""
+    try:
+        text = await asyncio.to_thread(
+            get_server_status_text
+        )
+
+        await update.message.reply_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=server_status_keyboard(),
+        )
+
+    except Exception as error:
+        logger.exception(
+            "Server command error: %s",
+            error,
+        )
+
+        await update.message.reply_text(
+            "🖥️ <b>STATUS SERVER</b>\n\n"
+            "❌ Gagal mendapatkan status server.",
+            parse_mode="HTML",
+        )
+
+
+async def help_command(
+    update,
+    context,
+):
+    """Paparkan bantuan command bot."""
+    await update.message.reply_text(
+        "🤖 <b>BANTUAN BOT</b>\n\n"
+        "⚡ <b>/speedtest</b>\n"
+        "Jalankan Speedtest sekarang.\n\n"
+        "🖥️ <b>/server</b>\n"
+        "Lihat status Raspberry Pi.\n\n"
+        "📊 <b>/status</b>\n"
+        "Lihat status bot dan akses pengguna.\n\n"
+        "🕌 <b>/solat</b>\n"
+        "Lihat waktu solat mengikut lokasi anda.\n\n"
+        "🏠 <b>/start</b>\n"
+        "Buka menu utama bot.\n\n"
+        "❓ Jika command tidak berfungsi, cuba /start terlebih dahulu.",
+        parse_mode="HTML",
+    )
+
 
 async def error_handler(
     update: object,
@@ -1697,6 +4257,8 @@ def main():
         .read_timeout(30)
         .write_timeout(30)
         .pool_timeout(30)
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
         .build()
     )
 
@@ -1704,6 +4266,41 @@ def main():
         CommandHandler(
             "start",
             start_command,
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "solat",
+            solat_command,
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "speedtest",
+            speedtest_command,
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "status",
+            status_command,
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "server",
+            server_command,
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "help",
+            help_command,
         )
     )
 
