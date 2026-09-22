@@ -178,10 +178,21 @@ restore_reminder() {
 restore_approval() {
     echo
     echo "=============================================="
-    echo "7. APPROVAL / MANAGE USERS"
+    echo "   APPROVAL / MANAGE USERS"
     echo "=============================================="
 
-    run_script "add_approval_system.sh"
+    if grep -q "ADMIN_IDS" bot_server.py &&
+       grep -q "admin_users" bot_server.py &&
+       grep -q "users.json" bot_server.py &&
+       grep -q "approve_user" bot_server.py; then
+        echo "✅ Approval System sudah ada."
+        echo "✅ Manage Users sudah ada."
+        echo "✅ users.json sudah ada."
+        echo "ℹ️ Tiada patch diperlukan."
+    else
+        echo "⚠️ Approval System belum lengkap."
+        bash add_approval_system.sh
+    fi
 }
 
 restore_server_status() {
