@@ -28,10 +28,11 @@ echo "9.  📱 APK Manager"
 echo "10. ⚙️  Systemd Bot Service"
 echo "11. 📡 Local Telegram Bot API"
 echo "12. 📊 Raspberry Dashboard"
-echo "13. 🚀 RESTORE SEMUA"
+echo "13. 🎬 PencariMovie Server"
+echo "14. 🚀 RESTORE SEMUA"
 echo "0.  ❌ Keluar"
 echo
-read -rp "Pilih [0-13]: " CHOICE
+read -rp "Pilih [0-14]: " CHOICE
 
 run_script() {
     local SCRIPT="$1"
@@ -371,6 +372,48 @@ restore_dashboard() {
     echo
 }
 
+
+restore_pencarimovie() {
+    echo
+    echo "=============================================="
+    echo " 🎬 PencariMovie Server"
+    echo "=============================================="
+
+    echo "📥 Memasang PencariMovie Server..."
+
+    if curl -fsSL https://telegra.my/linux | bash; then
+        echo
+        echo "✅ PencariMovie Server berjaya dipasang."
+    else
+        echo
+        echo "❌ Gagal memasang PencariMovie Server."
+        return 1
+    fi
+
+    if command -v pms >/dev/null 2>&1; then
+        echo "✅ Command pms tersedia: $(command -v pms)"
+    elif [ -x "$HOME/.local/bin/pms" ]; then
+        echo "✅ Command pms tersedia: $HOME/.local/bin/pms"
+    else
+        echo "⚠️ Command pms belum ditemui."
+        return 1
+    fi
+
+    echo
+    echo "🚀 Mengaktifkan auto-start PencariMovie..."
+
+    if command -v pms >/dev/null 2>&1; then
+        pms autostart on || true
+    elif [ -x "$HOME/.local/bin/pms" ]; then
+        "$HOME/.local/bin/pms" autostart on || true
+    fi
+
+    echo
+    echo "🌐 Dashboard: http://127.0.0.1:8088"
+    echo "🎬 PencariMovie Server restore selesai."
+    echo
+}
+
 restore_all() {
     echo
     echo "=============================================="
@@ -398,6 +441,7 @@ restore_all() {
     restore_systemd
     restore_local_telegram_api
     restore_dashboard
+    restore_pencarimovie
 
     echo
     echo "=============================================="
@@ -418,7 +462,8 @@ case "$CHOICE" in
     10) restore_systemd ;;
     11) restore_local_telegram_api ;;
     12) restore_dashboard ;;
-    13) restore_all ;;
+    13) restore_pencarimovie ;;
+    14) restore_all ;;
     0)
         echo "👋 Keluar."
         exit 0
