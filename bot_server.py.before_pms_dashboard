@@ -1,7 +1,6 @@
 import os
 from pathlib import Path
 import asyncio
-from pms_dashboard import show_pms, handle_pms_callback
 import json
 import logging
 import socket
@@ -2112,12 +2111,6 @@ def main_keyboard():
         ],
         [
             InlineKeyboardButton(
-                "🎬 PencariMovie Server",
-                callback_data="pms_menu",
-            )
-        ],
-        [
-            InlineKeyboardButton(
                 "🛡️ Pi-hole",
                 callback_data="pihole_menu",
             )
@@ -3361,30 +3354,6 @@ async def button_handler(
 
     query = update.callback_query
     callback = query.data
-
-    # =====================================================
-    # PENCARIMOVIE SERVER CALLBACKS
-    # =====================================================
-
-    if callback == "pms_menu":
-        if not is_admin(query.from_user.id):
-            await query.answer("🚫 Admin sahaja.", show_alert=True)
-            return
-
-        await query.answer()
-        await show_pms(query)
-        return
-
-    if callback.startswith("pms_"):
-        if not is_admin(query.from_user.id):
-            await query.answer("🚫 Admin sahaja.", show_alert=True)
-            return
-
-        await query.answer()
-        handled = await handle_pms_callback(query, callback)
-        if handled:
-            return
-
 
 
     if callback == "server_status":
@@ -4664,7 +4633,6 @@ async def setup_bot_commands(application):
         ("solat", "Waktu Solat"),
         ("status", "Status Bot"),
         ("server", "Status Server"),
-        ("pencarimovie", "PencariMovie Server"),
         ("help", "Bantuan"),
     ]
 

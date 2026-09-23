@@ -1,7 +1,6 @@
 import os
 from pathlib import Path
 import asyncio
-from pms_dashboard import show_pms, handle_pms_callback
 import json
 import logging
 import socket
@@ -13,26 +12,11 @@ from urllib.request import Request, urlopen
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
-    MessageHandler,
-    filters,
     Application,
     CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
 )
-
-import os
-from pathlib import Path
-
-# Load BOT_TOKEN from config.env
-config_file = Path("/home/azam/speedtest-bot/config.env")
-if config_file.exists():
-    for line in config_file.read_text().splitlines():
-        line = line.strip()
-        if line.startswith("BOT_TOKEN="):
-            value = line.split("=", 1)[1].strip().strip('"').strip("'")
-            os.environ["BOT_TOKEN"] = value
-            break
 
 from bot import BOT_TOKEN
 
@@ -101,8 +85,7 @@ def is_admin(user_id):
 
 
 def is_approved(user_id):
-    status = get_user_status(user_id)
-    return is_admin(user_id) or status == "approved"
+    return is_admin(user_id) or get_user_status(user_id) == "approved"
 
 
 def register_user(user):
@@ -277,7 +260,9 @@ async def handle_access_request(query, context):
 
 
 async def show_admin_users(query):
-    if not is_admin(query.from_user.id):
+    user_id = query.from_user.id
+
+    if not is_admin(user_id):
         await query.answer(
             "🚫 Admin sahaja.",
             show_alert=True,
@@ -286,75 +271,70 @@ async def show_admin_users(query):
 
     users = load_users()
 
-    counts = {
-        "approved": 0,
-        "pending": 0,
-        "rejected": 0,
-        "revoked": 0,
-        "blocked": 0,
-    }
+    approved = []
+    pending = []
+    rejected = []
 
-    for info in users.values():
+    for uid, info in users.items():
         status = info.get("status", "pending")
+        name = info.get("name", "")
+        username = info.get("username", "")
 
-        if status in counts:
-            counts[status] += 1
+        display = (
+            f"• {name}"
+            f" {'@' + username if username else ''}"
+            f" — <code>{uid}</code>"
+        )
+
+        if status == "approved":
+            approved.append(display)
+        elif status == "rejected":
+            rejected.append(display)
         else:
-            counts["pending"] += 1
+            pending.append(display)
 
     lines = [
         "👥 <b>USER MANAGEMENT</b>",
         "",
-        f"🟢 Active: <b>{counts['approved']}</b>",
-        f"🟡 Pending: <b>{counts['pending']}</b>",
-        f"🚫 Revoked: <b>{counts['revoked']}</b>",
-        f"🔴 Blocked: <b>{counts['blocked']}</b>",
-        f"⚪ Rejected: <b>{counts['rejected']}</b>",
+        f"⏳ Pending: <b>{len(pending)}</b>",
+        f"✅ Approved: <b>{len(approved)}</b>",
+        f"❌ Rejected: <b>{len(rejected)}</b>",
         "",
-        "👇 <b>Pilih kategori user:</b>",
     ]
+
+    if pending:
+        lines.append("<b>⏳ PENDING</b>")
+        lines.extend(pending)
+
+    if approved:
+        lines.append("")
+        lines.append("<b>✅ APPROVED</b>")
+        lines.extend(approved)
+
+    if rejected:
+        lines.append("")
+        lines.append("<b>❌ REJECTED</b>")
+        lines.extend(rejected)
 
     keyboard = InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton(
-                    "🟢 Active Users",
-                    callback_data="admin_approved",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "🟡 Pending Users",
-                    callback_data="admin_pending",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "🚫 Revoked Users",
-                    callback_data="admin_revoked",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "🔴 Blocked Users",
-                    callback_data="admin_blocked",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "⚪ Rejected Users",
-                    callback_data="admin_rejected_list",
+                    "🚫 Rejected Users",
+                    callback_data="admin_rejected",
                 )
             ],
             [
                 InlineKeyboardButton(
                     "🔄 Refresh",
                     callback_data="admin_users",
-                ),
+                )
+            ],
+            [
                 InlineKeyboardButton(
                     "🏠 Home",
                     callback_data="home",
-                ),
+                )
             ],
         ]
     )
@@ -362,6 +342,10 @@ async def show_admin_users(query):
     await query.edit_message_text(
         "\n".join(lines),
         parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
         reply_markup=keyboard,
     )
 
@@ -649,452 +633,6 @@ async def reject_user(query, context, target_id):
             "Tidak dapat hantar rejection notification: %s",
             error,
         )
-
-
-
-async def show_user_list(query, status_filter):
-    """Paparkan senarai user yang boleh dipilih oleh admin."""
-
-    if not is_admin(query.from_user.id):
-        await query.answer("🚫 Admin sahaja.", show_alert=True)
-        return
-
-    users = load_users()
-
-    selected = []
-    for uid, info in users.items():
-        status = info.get("status", "pending")
-
-        if status != status_filter:
-            continue
-
-        selected.append(
-            (
-                str(uid),
-                info.get("name", "Unknown"),
-                info.get("username", ""),
-            )
-        )
-
-    titles = {
-        "approved": "🟢 APPROVED USERS",
-        "pending": "🟡 PENDING USERS",
-        "rejected": "⚪ REJECTED USERS",
-        "revoked": "🚫 REVOKED USERS",
-        "blocked": "🔴 BLOCKED USERS",
-    }
-
-    lines = [
-        f"<b>{titles.get(status_filter, '👥 USERS')}</b>",
-        "",
-        f"Jumlah: <b>{len(selected)}</b>",
-        "",
-    ]
-
-    buttons = []
-
-    if not selected:
-        lines.append("Tiada user dalam kategori ini.")
-    else:
-        for uid, name, username in selected:
-            display = name or "Unknown"
-
-            if username:
-                display += f" @{username}"
-
-            buttons.append(
-                [
-                    InlineKeyboardButton(
-                        f"👤 {display[:30]}",
-                        callback_data=f"user_manage_{uid}",
-                    )
-                ]
-            )
-
-    buttons.append(
-        [
-            InlineKeyboardButton(
-                "⬅️ Manage Users",
-                callback_data="admin_users",
-            )
-        ]
-    )
-
-    buttons.append(
-        [
-            InlineKeyboardButton(
-                "🏠 Home",
-                callback_data="home",
-            )
-        ]
-    )
-
-    await query.edit_message_text(
-        "\n".join(lines),
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(buttons),
-    )
-
-
-async def show_user_manage(query, target_id):
-    """Paparkan tindakan untuk user yang dipilih."""
-
-    if not is_admin(query.from_user.id):
-        await query.answer("🚫 Admin sahaja.", show_alert=True)
-        return
-
-    users = load_users()
-    target_id = str(target_id)
-
-    if target_id not in users:
-        await query.answer(
-            "❌ User tidak dijumpai.",
-            show_alert=True,
-        )
-        return
-
-    info = users[target_id]
-
-    name = info.get("name", "Unknown")
-    username = info.get("username", "")
-    status = info.get("status", "pending")
-
-    status_text = {
-        "approved": "🟢 ACTIVE",
-        "pending": "🟡 PENDING",
-        "rejected": "⚪ REJECTED",
-        "revoked": "🚫 REVOKED",
-        "blocked": "🔴 BLOCKED",
-    }.get(status, status)
-
-    lines = [
-        "👤 <b>USER MANAGEMENT</b>",
-        "",
-        f"👤 Nama: <b>{name}</b>",
-        f"🆔 ID: <code>{target_id}</code>",
-    ]
-
-    if username:
-        lines.append(f"📱 Username: @{username}")
-
-    lines.extend(
-        [
-            f"📌 Status: <b>{status_text}</b>",
-            "",
-        ]
-    )
-
-    buttons = []
-
-    # Jangan benarkan admin mengubah dirinya sendiri.
-    if int(target_id) != query.from_user.id:
-
-        if status == "approved":
-            buttons.append(
-                [
-                    InlineKeyboardButton(
-                        "🚫 Revoke Access",
-                        callback_data=f"revoke_user_{target_id}",
-                    ),
-                    InlineKeyboardButton(
-                        "🔴 Block User",
-                        callback_data=f"block_user_{target_id}",
-                    ),
-                ]
-            )
-
-        elif status in ("pending", "rejected", "revoked"):
-            buttons.append(
-                [
-                    InlineKeyboardButton(
-                        "✅ Approve Access",
-                        callback_data=f"approve_user_{target_id}",
-                    )
-                ]
-            )
-
-        if status == "blocked":
-            buttons.append(
-                [
-                    InlineKeyboardButton(
-                        "🟢 Unblock User",
-                        callback_data=f"unblock_user_{target_id}",
-                    )
-                ]
-            )
-
-        if status != "blocked":
-            buttons.append(
-                [
-                    InlineKeyboardButton(
-                        "🔴 Block User",
-                        callback_data=f"block_user_{target_id}",
-                    )
-                ]
-            )
-
-    else:
-        lines.append("🛡️ Ini ialah akaun admin anda.")
-        lines.append("Akaun admin tidak boleh diubah.")
-
-    buttons.append(
-        [
-            InlineKeyboardButton(
-                "⬅️ Manage Users",
-                callback_data="admin_users",
-            )
-        ]
-    )
-
-    buttons.append(
-        [
-            InlineKeyboardButton(
-                "🏠 Home",
-                callback_data="home",
-            )
-        ]
-    )
-
-    await query.edit_message_text(
-        "\n".join(lines),
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(buttons),
-    )
-
-
-
-async def confirm_revoke_user(query, target_id):
-    if not is_admin(query.from_user.id):
-        await query.answer("🚫 Admin sahaja.", show_alert=True)
-        return
-
-    users = load_users()
-    target_id = str(target_id)
-
-    if target_id not in users:
-        await query.answer("❌ User tidak dijumpai.", show_alert=True)
-        return
-
-    if int(target_id) == query.from_user.id:
-        await query.answer(
-            "❌ Admin tidak boleh revoke diri sendiri.",
-            show_alert=True,
-        )
-        return
-
-    info = users[target_id]
-    name = info.get("name", "Unknown")
-
-    keyboard = InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(
-                    "✅ Ya, Revoke",
-                    callback_data=f"confirm_revoke_{target_id}",
-                ),
-                InlineKeyboardButton(
-                    "❌ Batal",
-                    callback_data=f"user_manage_{target_id}",
-                ),
-            ]
-        ]
-    )
-
-    await query.edit_message_text(
-        "⚠️ <b>CONFIRM REVOKE</b>\n\n"
-        f"👤 User: <b>{name}</b>\n"
-        f"🆔 ID: <code>{target_id}</code>\n\n"
-        "User akan kehilangan akses bot.\n"
-        "User masih boleh request access semula.\n\n"
-        "Teruskan?",
-        parse_mode="HTML",
-        reply_markup=keyboard,
-    )
-
-
-async def confirm_block_user(query, target_id):
-    if not is_admin(query.from_user.id):
-        await query.answer("🚫 Admin sahaja.", show_alert=True)
-        return
-
-    users = load_users()
-    target_id = str(target_id)
-
-    if target_id not in users:
-        await query.answer("❌ User tidak dijumpai.", show_alert=True)
-        return
-
-    if int(target_id) == query.from_user.id:
-        await query.answer(
-            "❌ Admin tidak boleh block diri sendiri.",
-            show_alert=True,
-        )
-        return
-
-    info = users[target_id]
-    name = info.get("name", "Unknown")
-
-    keyboard = InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(
-                    "🔴 Ya, Block",
-                    callback_data=f"confirm_block_{target_id}",
-                ),
-                InlineKeyboardButton(
-                    "❌ Batal",
-                    callback_data=f"user_manage_{target_id}",
-                ),
-            ]
-        ]
-    )
-
-    await query.edit_message_text(
-        "⚠️ <b>CONFIRM BLOCK</b>\n\n"
-        f"👤 User: <b>{name}</b>\n"
-        f"🆔 ID: <code>{target_id}</code>\n\n"
-        "User akan disekat daripada menggunakan bot.\n"
-        "Request access juga akan ditolak.\n\n"
-        "Teruskan?",
-        parse_mode="HTML",
-        reply_markup=keyboard,
-    )
-
-
-async def revoke_user(query, target_id):
-    if not is_admin(query.from_user.id):
-        await query.answer("🚫 Admin sahaja.", show_alert=True)
-        return
-
-    users = load_users()
-    target_id = str(target_id)
-
-    if target_id not in users:
-        await query.answer("❌ User tidak dijumpai.", show_alert=True)
-        return
-
-    if int(target_id) == query.from_user.id:
-        await query.answer(
-            "❌ Admin tidak boleh revoke diri sendiri.",
-            show_alert=True,
-        )
-        return
-
-    users[target_id]["status"] = "revoked"
-    save_users(users)
-
-    await query.edit_message_text(
-        "🚫 <b>ACCESS REVOKED</b>\n\n"
-        f"👤 {users[target_id].get('name', 'Unknown')}\n"
-        f"🆔 <code>{target_id}</code>\n\n"
-        "User ini tidak lagi mempunyai akses bot.\n"
-        "User masih boleh membuat permintaan akses semula.",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton(
-                        "⬅️ Manage Users",
-                        callback_data="admin_users",
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        "🏠 Home",
-                        callback_data="home",
-                    )
-                ],
-            ]
-        ),
-    )
-
-
-async def block_user(query, target_id):
-    if not is_admin(query.from_user.id):
-        await query.answer("🚫 Admin sahaja.", show_alert=True)
-        return
-
-    users = load_users()
-    target_id = str(target_id)
-
-    if target_id not in users:
-        await query.answer("❌ User tidak dijumpai.", show_alert=True)
-        return
-
-    if int(target_id) == query.from_user.id:
-        await query.answer(
-            "❌ Admin tidak boleh block diri sendiri.",
-            show_alert=True,
-        )
-        return
-
-    users[target_id]["status"] = "blocked"
-    save_users(users)
-
-    await query.edit_message_text(
-        "🔴 <b>USER BLOCKED</b>\n\n"
-        f"👤 {users[target_id].get('name', 'Unknown')}\n"
-        f"🆔 <code>{target_id}</code>\n\n"
-        "User ini telah disekat daripada menggunakan bot.",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton(
-                        "⬅️ Manage Users",
-                        callback_data="admin_users",
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        "🏠 Home",
-                        callback_data="home",
-                    )
-                ],
-            ]
-        ),
-    )
-
-
-async def unblock_user(query, target_id):
-    if not is_admin(query.from_user.id):
-        await query.answer("🚫 Admin sahaja.", show_alert=True)
-        return
-
-    users = load_users()
-    target_id = str(target_id)
-
-    if target_id not in users:
-        await query.answer("❌ User tidak dijumpai.", show_alert=True)
-        return
-
-    users[target_id]["status"] = "revoked"
-    save_users(users)
-
-    await query.edit_message_text(
-        "🟢 <b>USER UNBLOCKED</b>\n\n"
-        f"👤 {users[target_id].get('name', 'Unknown')}\n"
-        f"🆔 <code>{target_id}</code>\n\n"
-        "User telah dibuka sekatannya.\n"
-        "Status ditetapkan kepada REVOKED dan perlu approve semula.",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton(
-                        "⬅️ Manage Users",
-                        callback_data="admin_users",
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        "🏠 Home",
-                        callback_data="home",
-                    )
-                ],
-            ]
-        ),
-    )
 
 
 async def show_access_denied(query):
@@ -2108,12 +1646,6 @@ def main_keyboard():
             InlineKeyboardButton(
                 "🖥️ Status Server",
                 callback_data="server_status",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🎬 PencariMovie Server",
-                callback_data="pms_menu",
             )
         ],
         [
@@ -3197,6 +2729,10 @@ async def send_apk(query, context, index):
         await query.edit_message_text(
             "❌ APK tidak dijumpai.",
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
             reply_markup=InlineKeyboardMarkup(
                 [
                     [
@@ -3210,13 +2746,15 @@ async def send_apk(query, context, index):
         )
         return
 
-    file_size = apk.stat().st_size
     await query.edit_message_text(
         "📦 <b>APK MANAGER</b>\n\n"
         f"📱 <b>{apk.stem}</b>\n"
-        f"📦 Saiz: <b>{file_size / 1024 / 1024:.2f} MB</b>\n"
         "⏳ <i>Sedang hantar APK...</i>",
         parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
     )
 
     try:
@@ -3237,6 +2775,10 @@ async def send_apk(query, context, index):
             "✅ <b>APK berjaya dihantar.</b>\n\n"
             f"📱 {apk.stem}",
             parse_mode="HTML",
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
             reply_markup=InlineKeyboardMarkup(
                 [
                     [
@@ -3262,17 +2804,17 @@ async def send_apk(query, context, index):
             "❌ <b>Gagal menghantar APK.</b>\n\n"
             f"<code>{error}</code>",
             parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(
-                [
-                    [
-                        InlineKeyboardButton(
-                            "⬅️ APK Manager",
-                            callback_data="apk_menu",
-                        )
-                    ]
-                ]
-            ),
+                connect_timeout=30,
+                read_timeout=120,
+                write_timeout=600,
+                pool_timeout=30,
         )
+
+
+# =========================================================
+# CALLBACK HANDLER
+# =========================================================
+
 
 async def show_solat_date_menu(query):
     selected_date = get_user_solat_date(
@@ -3361,30 +2903,6 @@ async def button_handler(
 
     query = update.callback_query
     callback = query.data
-
-    # =====================================================
-    # PENCARIMOVIE SERVER CALLBACKS
-    # =====================================================
-
-    if callback == "pms_menu":
-        if not is_admin(query.from_user.id):
-            await query.answer("🚫 Admin sahaja.", show_alert=True)
-            return
-
-        await query.answer()
-        await show_pms(query)
-        return
-
-    if callback.startswith("pms_"):
-        if not is_admin(query.from_user.id):
-            await query.answer("🚫 Admin sahaja.", show_alert=True)
-            return
-
-        await query.answer()
-        handled = await handle_pms_callback(query, callback)
-        if handled:
-            return
-
 
 
     if callback == "server_status":
@@ -3550,56 +3068,6 @@ async def button_handler(
 
     if callback == "admin_users":
         await show_admin_users(query)
-        return
-
-    if callback == "admin_approved":
-        await show_user_list(query, "approved")
-        return
-
-    if callback == "admin_pending":
-        await show_user_list(query, "pending")
-        return
-
-    if callback == "admin_rejected_list":
-        await show_user_list(query, "rejected")
-        return
-
-    if callback == "admin_revoked":
-        await show_user_list(query, "revoked")
-        return
-
-    if callback == "admin_blocked":
-        await show_user_list(query, "blocked")
-        return
-
-    if callback.startswith("user_manage_"):
-        target_id = callback.replace("user_manage_", "", 1)
-        await show_user_manage(query, target_id)
-        return
-
-    if callback.startswith("revoke_user_"):
-        target_id = callback.replace("revoke_user_", "", 1)
-        await confirm_revoke_user(query, target_id)
-        return
-
-    if callback.startswith("confirm_revoke_"):
-        target_id = callback.replace("confirm_revoke_", "", 1)
-        await revoke_user(query, target_id)
-        return
-
-    if callback.startswith("block_user_"):
-        target_id = callback.replace("block_user_", "", 1)
-        await confirm_block_user(query, target_id)
-        return
-
-    if callback.startswith("confirm_block_"):
-        target_id = callback.replace("confirm_block_", "", 1)
-        await block_user(query, target_id)
-        return
-
-    if callback.startswith("unblock_user_"):
-        target_id = callback.replace("unblock_user_", "", 1)
-        await unblock_user(query, target_id)
         return
 
     if callback == "admin_rejected":
@@ -4664,7 +4132,6 @@ async def setup_bot_commands(application):
         ("solat", "Waktu Solat"),
         ("status", "Status Bot"),
         ("server", "Status Server"),
-        ("pencarimovie", "PencariMovie Server"),
         ("help", "Bantuan"),
     ]
 
@@ -5362,118 +4829,6 @@ async def help_command(
     )
 
 
-
-# =========================================================
-# TELEGRAM FILE UPLOAD
-# =========================================================
-
-UPLOAD_DIR = Path("/home/azam/telegram-upload")
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def safe_upload_filename(filename):
-    """Bersihkan nama fail dan elakkan overwrite."""
-    filename = Path(filename or "uploaded_file").name
-
-    # Buang karakter pelik / berbahaya
-    filename = "".join(
-        c for c in filename
-        if c.isalnum() or c in " ._-()[]{}"
-    ).strip()
-
-    if not filename:
-        filename = "uploaded_file"
-
-    destination = UPLOAD_DIR / filename
-
-    # Elak overwrite
-    if not destination.exists():
-        return destination
-
-    stem = destination.stem
-    suffix = destination.suffix
-    counter = 1
-
-    while True:
-        new_destination = UPLOAD_DIR / f"{stem}_{counter}{suffix}"
-
-        if not new_destination.exists():
-            return new_destination
-
-        counter += 1
-
-
-async def receive_file(update, context):
-    """Terima fail daripada Telegram dan simpan ke Raspberry Pi."""
-
-    user = update.effective_user
-    message = update.effective_message
-
-    if not user or not message:
-        return
-
-    # Hanya user yang dibenarkan
-    if not is_approved(user.id):
-        await message.reply_text(
-            "❌ Anda tidak mempunyai akses untuk upload file."
-        )
-        return
-
-    document = message.document
-
-    if not document:
-        return
-
-    filename = document.file_name or f"file_{document.file_unique_id}"
-
-    destination = safe_upload_filename(filename)
-
-    try:
-        await message.reply_text(
-            f"⏳ Menerima file...\n\n"
-            f"📄 {filename}\n"
-            f"📦 {document.file_size or 0:,} bytes"
-        )
-
-        telegram_file = await document.get_file()
-
-        await telegram_file.download_to_drive(
-            custom_path=str(destination)
-        )
-
-        size = destination.stat().st_size
-        size_mb = size / (1024 * 1024)
-
-        await message.reply_text(
-            f"✅ Upload berjaya!\n\n"
-            f"📄 File: {destination.name}\n"
-            f"📦 Saiz: {size_mb:.2f} MB\n"
-            f"📁 Lokasi:\n"
-            f"{destination}"
-        )
-
-        logger.info(
-            "File uploaded: user=%s file=%s size=%d",
-            user.id,
-            destination,
-            size,
-        )
-
-    except Exception as e:
-        logger.exception("Gagal menerima file")
-
-        if destination.exists():
-            try:
-                destination.unlink()
-            except Exception:
-                pass
-
-        await message.reply_text(
-            f"❌ Gagal upload file.\n\n"
-            f"Error: {e}"
-        )
-
-
 async def error_handler(
     update: object,
     context: ContextTypes.DEFAULT_TYPE,
@@ -5492,12 +4847,9 @@ def main():
     application = (
         Application.builder()
         .token(BOT_TOKEN)
-        .base_url("http://127.0.0.1:8081/bot")
-        .base_file_url("http://127.0.0.1:8081/file/bot")
-        .local_mode(True)
         .connect_timeout(30)
-        .read_timeout(120)
-        .write_timeout(600)
+        .read_timeout(30)
+        .write_timeout(30)
         .pool_timeout(30)
         .post_init(post_init)
         .post_shutdown(post_shutdown)
@@ -5543,13 +4895,6 @@ def main():
         CommandHandler(
             "help",
             help_command,
-        )
-    )
-
-    application.add_handler(
-        MessageHandler(
-            filters.Document.ALL,
-            receive_file
         )
     )
 

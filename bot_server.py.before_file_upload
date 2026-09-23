@@ -1,7 +1,6 @@
 import os
 from pathlib import Path
 import asyncio
-from pms_dashboard import show_pms, handle_pms_callback
 import json
 import logging
 import socket
@@ -13,8 +12,6 @@ from urllib.request import Request, urlopen
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
-    MessageHandler,
-    filters,
     Application,
     CommandHandler,
     CallbackQueryHandler,
@@ -2112,12 +2109,6 @@ def main_keyboard():
         ],
         [
             InlineKeyboardButton(
-                "🎬 PencariMovie Server",
-                callback_data="pms_menu",
-            )
-        ],
-        [
-            InlineKeyboardButton(
                 "🛡️ Pi-hole",
                 callback_data="pihole_menu",
             )
@@ -3361,30 +3352,6 @@ async def button_handler(
 
     query = update.callback_query
     callback = query.data
-
-    # =====================================================
-    # PENCARIMOVIE SERVER CALLBACKS
-    # =====================================================
-
-    if callback == "pms_menu":
-        if not is_admin(query.from_user.id):
-            await query.answer("🚫 Admin sahaja.", show_alert=True)
-            return
-
-        await query.answer()
-        await show_pms(query)
-        return
-
-    if callback.startswith("pms_"):
-        if not is_admin(query.from_user.id):
-            await query.answer("🚫 Admin sahaja.", show_alert=True)
-            return
-
-        await query.answer()
-        handled = await handle_pms_callback(query, callback)
-        if handled:
-            return
-
 
 
     if callback == "server_status":
@@ -4664,7 +4631,6 @@ async def setup_bot_commands(application):
         ("solat", "Waktu Solat"),
         ("status", "Status Bot"),
         ("server", "Status Server"),
-        ("pencarimovie", "PencariMovie Server"),
         ("help", "Bantuan"),
     ]
 
@@ -5362,118 +5328,6 @@ async def help_command(
     )
 
 
-
-# =========================================================
-# TELEGRAM FILE UPLOAD
-# =========================================================
-
-UPLOAD_DIR = Path("/home/azam/telegram-upload")
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def safe_upload_filename(filename):
-    """Bersihkan nama fail dan elakkan overwrite."""
-    filename = Path(filename or "uploaded_file").name
-
-    # Buang karakter pelik / berbahaya
-    filename = "".join(
-        c for c in filename
-        if c.isalnum() or c in " ._-()[]{}"
-    ).strip()
-
-    if not filename:
-        filename = "uploaded_file"
-
-    destination = UPLOAD_DIR / filename
-
-    # Elak overwrite
-    if not destination.exists():
-        return destination
-
-    stem = destination.stem
-    suffix = destination.suffix
-    counter = 1
-
-    while True:
-        new_destination = UPLOAD_DIR / f"{stem}_{counter}{suffix}"
-
-        if not new_destination.exists():
-            return new_destination
-
-        counter += 1
-
-
-async def receive_file(update, context):
-    """Terima fail daripada Telegram dan simpan ke Raspberry Pi."""
-
-    user = update.effective_user
-    message = update.effective_message
-
-    if not user or not message:
-        return
-
-    # Hanya user yang dibenarkan
-    if not is_approved(user.id):
-        await message.reply_text(
-            "❌ Anda tidak mempunyai akses untuk upload file."
-        )
-        return
-
-    document = message.document
-
-    if not document:
-        return
-
-    filename = document.file_name or f"file_{document.file_unique_id}"
-
-    destination = safe_upload_filename(filename)
-
-    try:
-        await message.reply_text(
-            f"⏳ Menerima file...\n\n"
-            f"📄 {filename}\n"
-            f"📦 {document.file_size or 0:,} bytes"
-        )
-
-        telegram_file = await document.get_file()
-
-        await telegram_file.download_to_drive(
-            custom_path=str(destination)
-        )
-
-        size = destination.stat().st_size
-        size_mb = size / (1024 * 1024)
-
-        await message.reply_text(
-            f"✅ Upload berjaya!\n\n"
-            f"📄 File: {destination.name}\n"
-            f"📦 Saiz: {size_mb:.2f} MB\n"
-            f"📁 Lokasi:\n"
-            f"{destination}"
-        )
-
-        logger.info(
-            "File uploaded: user=%s file=%s size=%d",
-            user.id,
-            destination,
-            size,
-        )
-
-    except Exception as e:
-        logger.exception("Gagal menerima file")
-
-        if destination.exists():
-            try:
-                destination.unlink()
-            except Exception:
-                pass
-
-        await message.reply_text(
-            f"❌ Gagal upload file.\n\n"
-            f"Error: {e}"
-        )
-
-
 async def error_handler(
     update: object,
     context: ContextTypes.DEFAULT_TYPE,
@@ -5543,13 +5397,6 @@ def main():
         CommandHandler(
             "help",
             help_command,
-        )
-    )
-
-    application.add_handler(
-        MessageHandler(
-            filters.Document.ALL,
-            receive_file
         )
     )
 
