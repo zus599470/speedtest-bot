@@ -27,10 +27,11 @@ echo "8.  🖥️  Server Status"
 echo "9.  📱 APK Manager"
 echo "10. ⚙️  Systemd Bot Service"
 echo "11. 📡 Local Telegram Bot API"
-echo "12. 🚀 RESTORE SEMUA"
+echo "12. 📊 Raspberry Dashboard"
+echo "13. 🚀 RESTORE SEMUA"
 echo "0.  ❌ Keluar"
 echo
-read -rp "Pilih [0-12]: " CHOICE
+read -rp "Pilih [0-13]: " CHOICE
 
 run_script() {
     local SCRIPT="$1"
@@ -329,10 +330,51 @@ EOF
     fi
 }
 
+
+restore_dashboard() {
+    echo
+    echo "=============================================="
+    echo " 📊 Raspberry Dashboard"
+    echo "=============================================="
+
+    DASHBOARD_DIR="/home/azam/raspberry-dashboard"
+    REPO_DIR="/home/azam/speedtest-bot/raspberry-dashboard"
+
+    mkdir -p "$DASHBOARD_DIR"
+
+    if [ ! -f "$REPO_DIR/app.py" ]; then
+        echo "❌ app.py tidak dijumpai dalam GitHub repo."
+        return 1
+    fi
+
+    cp "$REPO_DIR/app.py" "$DASHBOARD_DIR/app.py"
+
+    if [ -f "$REPO_DIR/.gitignore" ]; then
+        cp "$REPO_DIR/.gitignore" "$DASHBOARD_DIR/.gitignore"
+    fi
+
+    echo "📁 Dashboard: $DASHBOARD_DIR"
+    echo "📄 app.py berjaya dipulihkan."
+
+    if [ ! -d "$DASHBOARD_DIR/venv" ]; then
+        echo "🐍 Membina Python virtual environment..."
+        python3 -m venv "$DASHBOARD_DIR/venv"
+    fi
+
+    echo "📦 Memasang Flask..."
+    "$DASHBOARD_DIR/venv/bin/pip" install --upgrade pip >/dev/null 2>&1
+    "$DASHBOARD_DIR/venv/bin/pip" install flask >/dev/null 2>&1
+
+    echo
+    echo "✅ Raspberry Dashboard berjaya dipulihkan."
+    echo "📍 Lokasi: $DASHBOARD_DIR"
+    echo
+}
+
 restore_all() {
     echo
     echo "=============================================="
-    echo "12. 🚀 RESTORE SEMUA"
+    echo " 🚀 RESTORE SEMUA"
     echo "=============================================="
 
     echo
@@ -355,6 +397,7 @@ restore_all() {
     restore_apk
     restore_systemd
     restore_local_telegram_api
+    restore_dashboard
 
     echo
     echo "=============================================="
@@ -373,7 +416,9 @@ case "$CHOICE" in
     8)  restore_server_status ;;
     9)  restore_apk ;;
     10) restore_systemd ;;
-    11) restore_all ;;
+    11) restore_local_telegram_api ;;
+    12) restore_dashboard ;;
+    13) restore_all ;;
     0)
         echo "👋 Keluar."
         exit 0
@@ -388,3 +433,4 @@ echo
 echo "=============================================="
 echo " Selesai."
 echo "=============================================="
+
