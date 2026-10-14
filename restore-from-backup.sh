@@ -97,7 +97,7 @@ case "$choice" in
     while IFS= read -r -d '' src; do
       rel="${src#"$BACKUP_DIR/private/"}"
       case "$rel" in
-        home/azam/*) target="/${rel#home/azam/}" ;;
+        home/azam/*) target="/home/azam/${rel#home/azam/}" ;;
         cloudflared/token) target="/etc/cloudflared/token" ;;
         *) printf 'SKIP: laluan tidak dikenali: %s\n' "$rel"; continue ;;
       esac
