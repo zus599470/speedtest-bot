@@ -10,3 +10,19 @@ pihole_api.before-github
 *.backup*
 *.before-*
 *~
+
+# Private configuration and runtime state
+.env
+.env.*
+!.env.example
+config.env
+telegram_api.env
+users.json
+hermes_news_seen.json
+hermes_pending.json
+hermes_script_manager_state.json
+.hermes_backups/
+raspi-private-backup-*/
+*.tar.gz
+*.sqlite
+*.db
