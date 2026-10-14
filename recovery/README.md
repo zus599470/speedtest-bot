@@ -8,7 +8,7 @@ This directory contains a cautious restore helper for the private backup made on
 - Keep at least two copies of the private archive (for example, Windows plus an external drive).
 - The helper does **not** automatically start services, install all packages, or restore Pi-hole configuration. Those steps require checking the target system and versions.
 - The archive was validated and its SHA-256 matched on Windows, but a full restore has not yet been tested on a clean Ubuntu installation.
-- Existing project folders are moved to a timestamped backup before a project restore. Review the proposed actions first.
+- Existing project folders are skipped and never overwritten. If a folder already exists, back it up and decide manually before retrying.
 - Review backed-up systemd unit files before installing them on a new OS.
 
 ## Backup layout expected
